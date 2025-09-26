@@ -4,9 +4,14 @@ from __future__ import annotations
 import datetime as dt
 import re
 import urllib.parse
-from typing import Iterable, List
+from typing import Iterable, List, Sequence, TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - for type hints only
+    from .models import ClusterBullet, ClusterSummary
 
 _TRACKING_PARAM_PREFIXES = ("utm_", "icid", "gclid", "fbclid", "mc_cid", "mc_eid")
+_TELEMETRY_PATTERN = re.compile(r"^\w+=\S+(?:\s+\w+=\S+){2,}$")
+_DATE_IN_LINE = re.compile(r"\b(20\d{2}|19\d{2})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b")
 
 
 def canonicalise_url(url: str) -> str:
@@ -102,3 +107,99 @@ def chunk_texts_by_char_limit(texts: list[str], max_chars: int) -> list[list[str
         batches.append(current_batch)
 
     return batches
+
+
+def strip_telemetry_lines(text: str) -> str:
+    """Remove lines that resemble telemetry/log output from the model response."""
+
+    if not text:
+        return ""
+
+    artefact_keywords = ("message=Message(", "tool_calls=", "images=", "metadata=", "usage=")
+    lines = text.splitlines()
+    cleaned: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            cleaned.append("")
+            continue
+        if _TELEMETRY_PATTERN.match(stripped):
+            continue
+        lowered = stripped.lower()
+        if any(keyword in stripped for keyword in artefact_keywords):
+            continue
+        if lowered.startswith(("assistant:", "system:", "thinking:")):
+            continue
+        if stripped.startswith("<<<") or stripped.startswith(">>>"):
+            continue
+        cleaned.append(stripped)
+
+    while cleaned and cleaned[0].startswith("```"):
+        cleaned.pop(0)
+    while cleaned and cleaned[-1].startswith("```"):
+        cleaned.pop()
+
+    # Collapse successive blanks to single blank lines.
+    normalised: list[str] = []
+    previous_blank = False
+    for line in cleaned:
+        if not line:
+            if not previous_blank:
+                normalised.append("")
+            previous_blank = True
+        else:
+            normalised.append(line)
+            previous_blank = False
+
+    return "\n".join(normalised).strip()
+
+
+def collect_used_citations(clusters: Sequence["ClusterSummary"]) -> set[int]:
+    """Collect unique citation indices referenced across clusters."""
+
+    used: set[int] = set()
+    for cluster in clusters:
+        for bullet in cluster.bullets:
+            used.update(bullet.citations)
+    return used
+
+
+def citations_to_domains(
+    citations: Iterable[int],
+    sources_lookup: dict[int, tuple[str, str]],
+) -> set[str]:
+    """Map citation indices to their domains."""
+
+    domains: set[str] = set()
+    for idx in citations:
+        if idx in sources_lookup:
+            _, url = sources_lookup[idx]
+            domains.add(domain_of(url))
+    return domains
+
+
+def extract_dates_from_bullets(bullets: Sequence["ClusterBullet"]) -> list[tuple[dt.date, "ClusterBullet"]]:
+    """Extract ISO-like dates from bullet text, returning sorted pairs."""
+
+    dated: list[tuple[dt.date, "ClusterBullet"]] = []
+    for bullet in bullets:
+        dates = extract_iso_dates(bullet.text)
+        if not dates:
+            continue
+        dated.append((max(dates), bullet))
+    dated.sort(key=lambda item: item[0], reverse=True)
+    return dated
+
+
+def ensure_citation_suffix(text: str, citations: Sequence[int]) -> str:
+    """Ensure the bullet text ends with its citation markers."""
+
+    if not citations:
+        return text.strip()
+    markers = "".join(f"[{idx}]" for idx in citations)
+    stripped = text.rstrip()
+    if stripped.endswith(markers):
+        return stripped
+    # Remove trailing unmatched markers first
+    stripped = re.sub(r"\s*(\[[^\]]+\])*$", "", stripped).rstrip()
+    return f"{stripped} {markers}".strip()

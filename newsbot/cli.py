@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import re
 import sys
 import time
 from dataclasses import asdict, replace
-import logging
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -13,12 +14,13 @@ from zoneinfo import ZoneInfo
 from .config import AppConfig, load_config
 from .fetch import fetch_pages
 from .log import get_logger
-from .models import ClusterBullet, Digest, TopicSummary
-from .render import render_html, render_markdown
+from .models import Digest, TopicSummary
+from .metrics import compute_topic_metrics
+from .render import render_html, render_json, render_markdown
 from .search import search_topic
-from .store import save_manifest, start_run_dir, write_jsonl, write_text
+from .store import save_manifest, start_run_dir, write_json, write_jsonl, write_text
 from .summarise import summarise_topic
-from .utils import split_and_strip_csv
+from .utils import collect_used_citations, ensure_citation_suffix, split_and_strip_csv
 from .triage import triage_pages
 
 TZ_LONDON = ZoneInfo("Europe/London")
@@ -53,20 +55,25 @@ def _topics_from_arg(value: str | None) -> list[str]:
     return [topic.strip() for topic in value.split(",") if topic.strip()]
 
 
+_MARKER_PATTERN = re.compile(r"\[(\d+)\]")
+
+
 def _reindex_citations(summary: TopicSummary, mapping: dict[int, int]) -> None:
+    """Update bullet citations to global indices, pruning unmapped markers."""
+
     for cluster in summary.clusters:
         for bullet in cluster.bullets:
-            new_citations: list[int] = []
-            for citation in bullet.citations:
-                if citation in mapping:
-                    new_citations.append(mapping[citation])
-            bullet.citations = new_citations
-            if hasattr(bullet, "text"):
-                for old, new in mapping.items():
-                    old_marker = f"[{old}]"
-                    new_marker = f"[{new}]"
-                    if old_marker in bullet.text:
-                        bullet.text = bullet.text.replace(old_marker, new_marker)
+            mapped = [mapping[idx] for idx in bullet.citations if idx in mapping]
+
+            def _replace(match: re.Match[str]) -> str:
+                idx = int(match.group(1))
+                if idx in mapping:
+                    return f"[{mapping[idx]}]"
+                return ""
+
+            bullet.text = _MARKER_PATTERN.sub(_replace, bullet.text)
+            bullet.citations = mapped
+            bullet.text = ensure_citation_suffix(bullet.text, bullet.citations)
 
 
 def _log_summary(logger, digest: Digest, run_dir: Path) -> None:
@@ -91,6 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Search only; skip fetch and summarise steps.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging (DEBUG level).")
     return parser
+
+
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
 
     aggregated_topics: list[TopicSummary] = []
     aggregated_sources: list[tuple[int, str, str]] = []
+    sources_lookup: dict[int, tuple[str, str]] = {}
     elapsed: float | None = None
 
     start_time = time.perf_counter()
@@ -148,13 +158,28 @@ def main(argv: list[str] | None = None) -> int:
 
             summary, sources_table = summarise_topic(topic, triaged, cfg, logger, args.corroborate)
 
+            used_local = sorted(collect_used_citations(summary.clusters))
+            used_sources_local = [entry for entry in sources_table if entry[0] in used_local]
+            unused_sources_local = [
+                (title, url) for idx, title, url in sources_table if idx not in used_local
+            ]
+
             index_mapping: dict[int, int] = {}
-            for local_idx, title, url in sources_table:
+            for local_idx, title, url in used_sources_local:
                 global_idx = len(aggregated_sources) + 1
                 aggregated_sources.append((global_idx, title, url))
+                sources_lookup[global_idx] = (title, url)
                 index_mapping[local_idx] = global_idx
 
             _reindex_citations(summary, index_mapping)
+
+            summary.unused_sources = unused_sources_local
+            summary.used_source_indices = sorted(
+                idx for idx in collect_used_citations(summary.clusters) if idx in sources_lookup
+            )
+
+            compute_topic_metrics(summary, sources_lookup, logger)
+
             aggregated_topics.append(summary)
 
         elapsed = time.perf_counter() - start_time
@@ -201,11 +226,15 @@ def main(argv: list[str] | None = None) -> int:
                 "outputs": {
                     "markdown": str(digest_path),
                     "html": str(html_path) if html_path else None,
+                    "json": str(run_dir / "digest.json"),
                 },
                 "sources": len(aggregated_sources),
             }
         )
         save_manifest(run_dir / "manifest.json", manifest)
+
+        json_payload = render_json(digest)
+        write_json(run_dir / "digest.json", json_payload)
 
         _log_summary(logger, digest, run_dir)
         logger.info("Markdown digest copied to %s", out_path.resolve())

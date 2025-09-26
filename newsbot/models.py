@@ -1,7 +1,7 @@
 """Data models for news-digest-bot."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
@@ -36,6 +36,11 @@ class ClusterSummary:
 class TopicSummary:
     topic: str
     clusters: list[ClusterSummary]
+    used_source_indices: list[int] = field(default_factory=list)
+    unused_sources: list[tuple[str, str]] = field(default_factory=list)
+    coverage_domains: int = 0
+    corroborated_bullets: int = 0
+    total_bullets: int = 0
 
 
 @dataclass(slots=True)

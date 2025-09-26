@@ -1,18 +1,29 @@
 """Topic summarisation using Ollama chat."""
 from __future__ import annotations
 
+import datetime as dt
 import re
 from typing import Iterable, List, Sequence, Tuple
 
-from ollama import chat
+try:  # Optional during offline testing
+    from ollama import chat
+except ImportError:  # pragma: no cover - fallback stub
+    def chat(*args, **kwargs):  # type: ignore
+        raise RuntimeError("ollama package is required for chat at runtime")
 
 from .config import AppConfig
-from .models import ClusterBullet, ClusterSummary, Digest, FetchedPage, TopicSummary
+from .models import ClusterBullet, ClusterSummary, FetchedPage, TopicSummary
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
-from .utils import chunk_texts_by_char_limit
+from .utils import (
+    chunk_texts_by_char_limit,
+    ensure_citation_suffix,
+    extract_iso_dates,
+    strip_telemetry_lines,
+)
 
 _CITATION_PATTERN = re.compile(r"\[(\d+)\]")
 _HEADING_PATTERN = re.compile(r"^#+\s+(.*)")
+_NON_MARKDOWN_FENCE = re.compile(r"^(```|~~~)")
 
 
 def _make_excerpt(text: str, max_chars: int) -> str:
@@ -50,6 +61,31 @@ def _sources_block(pages: Sequence[FetchedPage], max_chars: int) -> tuple[str, l
         chunked = chunk_texts_by_char_limit(rows, max_chars)
         block = "\n\n".join("\n\n".join(chunk) for chunk in chunked[:1])
     return block, mapping
+
+
+def _sanitise_content(text: str) -> str:
+    """Remove telemetry, tool dumps, and stray fences from model output."""
+
+    if not text:
+        return ""
+
+    stripped = strip_telemetry_lines(text)
+    if not stripped:
+        return ""
+
+    lines: list[str] = []
+    for raw_line in stripped.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            lines.append("")
+            continue
+        if _NON_MARKDOWN_FENCE.match(line) and "```mermaid" not in line.lower():
+            # Skip stray fences that would break parsing.
+            continue
+        lines.append(line)
+
+    cleaned = "\n".join(lines)
+    return cleaned.strip()
 
 
 def _extract_citations(text: str, max_index: int) -> list[int]:
@@ -125,6 +161,73 @@ def _clamp_bullets(clusters: list[ClusterSummary]) -> list[ClusterSummary]:
     return clamped
 
 
+def _enforce_topic_bullet_cap(clusters: list[ClusterSummary], cap: int = 25) -> list[ClusterSummary]:
+    """Keep at most ``cap`` bullets across clusters, preferring corroborated and recent ones."""
+
+    catalogue: list[tuple[int, int, ClusterBullet, bool, dt.date, int, int]] = []
+    sequence = 0
+    for cluster_idx, cluster in enumerate(clusters):
+        for bullet_idx, bullet in enumerate(cluster.bullets):
+            dates = extract_iso_dates(bullet.text)
+            latest = max(dates) if dates else dt.date.min
+            unique_citations = sorted(set(bullet.citations))
+            corroborated = False
+            if len(unique_citations) >= 2:
+                corroborated = True
+            catalogue.append(
+                (
+                    cluster_idx,
+                    bullet_idx,
+                    bullet,
+                    corroborated,
+                    latest,
+                    len(unique_citations),
+                    sequence,
+                )
+            )
+            sequence += 1
+
+    if len(catalogue) <= cap:
+        return clusters
+
+    catalogue.sort(
+        key=lambda item: (
+            1 if item[3] else 0,
+            item[4],
+            item[5],
+            -len(item[2].text),
+            -item[6],
+        ),
+        reverse=True,
+    )
+    survivors = { (entry[0], entry[1]) for entry in catalogue[:cap] }
+
+    pruned: list[ClusterSummary] = []
+    for cluster_idx, cluster in enumerate(clusters):
+        new_bullets = [
+            bullet for bullet_idx, bullet in enumerate(cluster.bullets)
+            if (cluster_idx, bullet_idx) in survivors
+        ]
+        if new_bullets:
+            pruned.append(ClusterSummary(heading=cluster.heading, bullets=new_bullets))
+    return pruned
+
+
+def _normalise_bullets(clusters: list[ClusterSummary]) -> list[ClusterSummary]:
+    """Tidy bullet texts and ensure citations are well-formed."""
+
+    normalised: list[ClusterSummary] = []
+    for cluster in clusters:
+        bullets: list[ClusterBullet] = []
+        for bullet in cluster.bullets:
+            deduped = sorted(dict.fromkeys(bullet.citations))
+            text = ensure_citation_suffix(bullet.text.strip(), deduped)
+            bullets.append(ClusterBullet(text=text, citations=deduped))
+        if bullets:
+            normalised.append(ClusterSummary(heading=cluster.heading or "Summary", bullets=bullets))
+    return normalised
+
+
 def summarise_topic(
     topic: str,
     pages: list[FetchedPage],
@@ -170,10 +273,14 @@ def summarise_topic(
         logger.warning("Empty summary content for '%s'", topic)
         return TopicSummary(topic=topic, clusters=[]), sources_table
 
-    clusters = _parse_clusters(content, max_index=len(sources_table))
+    sanitised = _sanitise_content(content)
+
+    clusters = _parse_clusters(sanitised, max_index=len(sources_table))
     if not clusters:
-        clusters = _fallback_clusters(content, max_index=len(sources_table))
+        clusters = _fallback_clusters(sanitised or content, max_index=len(sources_table))
     clusters = _clamp_bullets(clusters)
+    clusters = _normalise_bullets(clusters)
+    clusters = _enforce_topic_bullet_cap(clusters)
 
     summary = TopicSummary(topic=topic, clusters=clusters)
     return summary, sources_table
