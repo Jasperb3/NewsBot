@@ -10,7 +10,8 @@ if TYPE_CHECKING:  # pragma: no cover - for type hints only
     from .models import ClusterBullet, ClusterSummary
 
 _TRACKING_PARAM_PREFIXES = ("utm_", "icid", "gclid", "fbclid", "mc_cid", "mc_eid")
-_TELEMETRY_PATTERN = re.compile(r"^\w+=\S+(?:\s+\w+=\S+){2,}$")
+_TELEMETRY_PATTERN = re.compile(r"^\s*(?:\w+=[^\s]+(?:\s+|$)){3,}")
+_TRAILING_CITATIONS_RE = re.compile(r"(\s*(\[[0-9]+\]))+$")
 _DATE_IN_LINE = re.compile(r"\b(20\d{2}|19\d{2})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b")
 
 
@@ -115,7 +116,16 @@ def strip_telemetry_lines(text: str) -> str:
     if not text:
         return ""
 
-    artefact_keywords = ("message=Message(", "tool_calls=", "images=", "metadata=", "usage=")
+    artefact_keywords = (
+        "message=Message(",
+        "tool_calls=",
+        "images=",
+        "metadata=",
+        "usage=",
+        "created_at=",
+        "total_duration=",
+        "eval_count=",
+    )
     lines = text.splitlines()
     cleaned: list[str] = []
     for line in lines:
@@ -128,7 +138,7 @@ def strip_telemetry_lines(text: str) -> str:
         lowered = stripped.lower()
         if any(keyword in stripped for keyword in artefact_keywords):
             continue
-        if lowered.startswith(("assistant:", "system:", "thinking:")):
+        if lowered.startswith(("assistant:", "system:", "thinking:", "message(", "tool:", "tools:")):
             continue
         if stripped.startswith("<<<") or stripped.startswith(">>>"):
             continue
@@ -200,6 +210,66 @@ def ensure_citation_suffix(text: str, citations: Sequence[int]) -> str:
     stripped = text.rstrip()
     if stripped.endswith(markers):
         return stripped
-    # Remove trailing unmatched markers first
-    stripped = re.sub(r"\s*(\[[^\]]+\])*$", "", stripped).rstrip()
+    stripped = _TRAILING_CITATIONS_RE.sub("", stripped).rstrip()
     return f"{stripped} {markers}".strip()
+
+
+def normalise_spaces(text: str) -> str:
+    """Collapse repeated whitespace and trim surrounding spaces."""
+
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def truncate_sentence(text: str, max_chars: int) -> str:
+    """Truncate text at word boundaries, appending ellipsis if needed."""
+
+    if max_chars <= 0:
+        return ""
+    clean = normalise_spaces(text)
+    if len(clean) <= max_chars:
+        return clean
+    words = clean.split()
+    acc: list[str] = []
+    length = 0
+    for word in words:
+        pending = (length + len(word) + (1 if acc else 0))
+        if pending > max_chars:
+            break
+        acc.append(word)
+        length = pending
+    if not acc:
+        return clean[: max_chars - 1] + "…"
+    return " ".join(acc).rstrip(".,;:") + "…"
+
+
+def strip_trailing_citations(text: str) -> str:
+    """Remove trailing citation markers from text."""
+
+    return _TRAILING_CITATIONS_RE.sub("", text or "").strip()
+
+
+def to_title_case(text: str) -> str:
+    """Convert text to basic title case while preserving acronyms."""
+
+    words = text.split()
+    titled: list[str] = []
+    for word in words:
+        if len(word) >= 3 and word.isupper():
+            titled.append(word)
+        else:
+            titled.append(word.capitalize())
+    return " ".join(titled)
+
+
+def sorted_domains(domains: Iterable[str]) -> list[str]:
+    """Return sorted unique domains from an iterable."""
+
+    return sorted({domain for domain in domains if domain})
+
+
+def first_sentence(text: str) -> str:
+    """Return the first sentence-like fragment from text."""
+
+    cleaned = normalise_spaces(text)
+    match = re.search(r"([^.?!]+[.?!])", cleaned)
+    return (match.group(1) if match else cleaned).strip()

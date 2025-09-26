@@ -20,7 +20,12 @@ from .render import render_html, render_json, render_markdown
 from .search import search_topic
 from .store import save_manifest, start_run_dir, write_json, write_jsonl, write_text
 from .summarise import summarise_topic
-from .utils import collect_used_citations, ensure_citation_suffix, split_and_strip_csv
+from .utils import (
+    collect_used_citations,
+    ensure_citation_suffix,
+    split_and_strip_csv,
+    strip_trailing_citations,
+)
 from .triage import triage_pages
 
 TZ_LONDON = ZoneInfo("Europe/London")
@@ -74,6 +79,79 @@ def _reindex_citations(summary: TopicSummary, mapping: dict[int, int]) -> None:
             bullet.text = _MARKER_PATTERN.sub(_replace, bullet.text)
             bullet.citations = mapped
             bullet.text = ensure_citation_suffix(bullet.text, bullet.citations)
+
+
+def _prune_empty_bullets(summary: TopicSummary, logger) -> None:
+    """Remove bullets without citations, logging a warning."""
+
+    new_clusters: list = []
+    for cluster in summary.clusters:
+        retained = []
+        for bullet in cluster.bullets:
+            if bullet.citations:
+                retained.append(bullet)
+            else:
+                logger.warning(
+                    "Dropping citation-free bullet in topic '%s': %s",
+                    summary.topic,
+                    bullet.text,
+                )
+        if retained:
+            cluster.bullets = retained
+            new_clusters.append(cluster)
+    summary.clusters = new_clusters
+
+
+def _compact_sources(
+    topics: list[TopicSummary],
+    sources: list[tuple[int, str, str]],
+    logger,
+) -> tuple[list[tuple[int, str, str]], dict[int, tuple[str, str]]]:
+    """Prune unused sources and reindex citations across topics."""
+
+    used_indices: set[int] = set()
+    for summary in topics:
+        for cluster in summary.clusters:
+            for bullet in cluster.bullets:
+                used_indices.update(bullet.citations)
+
+    new_sources: list[tuple[int, str, str]] = []
+    index_mapping: dict[int, int] = {}
+    next_idx = 1
+    for idx, title, url in sources:
+        if idx in used_indices:
+            index_mapping[idx] = next_idx
+            new_sources.append((next_idx, title, url))
+            next_idx += 1
+
+    for summary in topics:
+        for cluster in summary.clusters:
+            updated_bullets = []
+            for bullet in cluster.bullets:
+                mapped = [index_mapping[c] for c in bullet.citations if c in index_mapping]
+                if not mapped:
+                    logger.warning(
+                        "Dropping citation-free bullet in topic '%s' after source compaction: %s",
+                        summary.topic,
+                        bullet.text,
+                    )
+                    continue
+                bullet.citations = mapped
+                bullet.text = ensure_citation_suffix(strip_trailing_citations(bullet.text), bullet.citations)
+                updated_bullets.append(bullet)
+            cluster.bullets = updated_bullets
+        summary.clusters = [cluster for cluster in summary.clusters if cluster.bullets]
+        summary.used_source_indices = sorted(
+            {
+                cite
+                for cluster in summary.clusters
+                for bullet in cluster.bullets
+                for cite in bullet.citations
+            }
+        )
+
+    sources_lookup = {idx: (title, url) for idx, title, url in new_sources}
+    return new_sources, sources_lookup
 
 
 def _log_summary(logger, digest: Digest, run_dir: Path) -> None:
@@ -173,12 +251,12 @@ def main(argv: list[str] | None = None) -> int:
 
             _reindex_citations(summary, index_mapping)
 
+            _prune_empty_bullets(summary, logger)
+
             summary.unused_sources = unused_sources_local
             summary.used_source_indices = sorted(
                 idx for idx in collect_used_citations(summary.clusters) if idx in sources_lookup
             )
-
-            compute_topic_metrics(summary, sources_lookup, logger)
 
             aggregated_topics.append(summary)
 
@@ -189,6 +267,11 @@ def main(argv: list[str] | None = None) -> int:
             save_manifest(run_dir / "manifest.json", manifest)
             logger.info("Dry run complete. Search data stored in %s", run_dir)
             return 0
+
+        aggregated_sources, sources_lookup = _compact_sources(aggregated_topics, aggregated_sources, logger)
+
+        for summary in aggregated_topics:
+            compute_topic_metrics(summary, sources_lookup, logger)
 
         digest = Digest(
             run_id=run_id,

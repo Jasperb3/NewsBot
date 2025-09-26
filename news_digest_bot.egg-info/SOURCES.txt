@@ -11,6 +11,7 @@ newsbot/cli.py
 newsbot/config.py
 newsbot/fetch.py
 newsbot/log.py
+newsbot/metrics.py
 newsbot/models.py
 newsbot/prompts.py
 newsbot/render.py
@@ -19,6 +20,9 @@ newsbot/store.py
 newsbot/summarise.py
 newsbot/triage.py
 newsbot/utils.py
+tests/test_cli_metrics.py
+tests/test_render.py
 tests/test_search.py
+tests/test_summarise.py
 tests/test_triage.py
 tests/test_utils.py

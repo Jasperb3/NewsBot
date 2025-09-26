@@ -18,12 +18,17 @@ from .utils import (
     chunk_texts_by_char_limit,
     ensure_citation_suffix,
     extract_iso_dates,
+    normalise_spaces,
     strip_telemetry_lines,
+    strip_trailing_citations,
+    truncate_sentence,
 )
 
 _CITATION_PATTERN = re.compile(r"\[(\d+)\]")
-_HEADING_PATTERN = re.compile(r"^#+\s+(.*)")
+_HEADING_PATTERN = re.compile(r"^(#+)\s+(.*)")
+_BOLD_HEADING_PATTERN = re.compile(r"^\*\*(.+?)\*\*\s*$")
 _NON_MARKDOWN_FENCE = re.compile(r"^(```|~~~)")
+_MAX_CLUSTER_BULLET_CHARS = 320
 
 
 def _make_excerpt(text: str, max_chars: int) -> str:
@@ -79,8 +84,7 @@ def _sanitise_content(text: str) -> str:
         if not line:
             lines.append("")
             continue
-        if _NON_MARKDOWN_FENCE.match(line) and "```mermaid" not in line.lower():
-            # Skip stray fences that would break parsing.
+        if _NON_MARKDOWN_FENCE.match(line) and "```markdown" not in line.lower():
             continue
         lines.append(line)
 
@@ -117,7 +121,12 @@ def _parse_clusters(raw: str, max_index: int) -> list[ClusterSummary]:
         heading_match = _HEADING_PATTERN.match(stripped)
         if heading_match:
             flush()
-            current_heading = heading_match.group(1).strip()
+            current_heading = heading_match.group(2).strip()
+            continue
+        bold_match = _BOLD_HEADING_PATTERN.match(stripped)
+        if bold_match:
+            flush()
+            current_heading = bold_match.group(1).strip()
             continue
         if stripped.endswith(":") and not stripped.startswith("-") and not stripped.startswith("*"):
             flush()
@@ -139,13 +148,20 @@ def _parse_clusters(raw: str, max_index: int) -> list[ClusterSummary]:
 
 
 def _fallback_clusters(raw: str, max_index: int) -> list[ClusterSummary]:
-    paragraphs = [para.strip() for para in raw.split("\n\n") if para.strip()]
-    bullets = []
-    for para in paragraphs:
-        citations = _extract_citations(para, max_index)
-        bullets.append(ClusterBullet(text=para, citations=citations))
-    if not bullets:
-        bullets = [ClusterBullet(text=raw.strip(), citations=_extract_citations(raw, max_index))]
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    bullets: list[ClusterBullet] = []
+    for line in lines:
+        if line.startswith(("- ", "• ", "* ")):
+            text = line[2:].strip()
+        else:
+            text = line
+        citations = _extract_citations(text, max_index)
+        bullets.append(ClusterBullet(text=text, citations=citations))
+        if len(bullets) >= 5:
+            break
+    if not bullets and raw.strip():
+        citations = _extract_citations(raw, max_index)
+        bullets = [ClusterBullet(text=raw.strip(), citations=citations)]
     return [ClusterSummary(heading="Summary", bullets=bullets)]
 
 
@@ -221,7 +237,12 @@ def _normalise_bullets(clusters: list[ClusterSummary]) -> list[ClusterSummary]:
         bullets: list[ClusterBullet] = []
         for bullet in cluster.bullets:
             deduped = sorted(dict.fromkeys(bullet.citations))
-            text = ensure_citation_suffix(bullet.text.strip(), deduped)
+            if not deduped:
+                continue
+            text = normalise_spaces(bullet.text)
+            text = strip_trailing_citations(text)
+            text = truncate_sentence(text, _MAX_CLUSTER_BULLET_CHARS)
+            text = ensure_citation_suffix(text, deduped)
             bullets.append(ClusterBullet(text=text, citations=deduped))
         if bullets:
             normalised.append(ClusterSummary(heading=cluster.heading or "Summary", bullets=bullets))
@@ -261,11 +282,8 @@ def summarise_topic(
         raise
 
     if isinstance(response, dict):
-        content = (
-            response.get("message", {}).get("content")
-            or response.get("content")
-            or ""
-        )
+        message = response.get("message") or {}
+        content = message.get("content") or response.get("content") or ""
     else:  # pragma: no cover - defensive
         content = str(response)
 
