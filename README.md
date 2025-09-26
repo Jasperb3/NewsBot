@@ -1,0 +1,96 @@
+# news-digest-bot
+
+Generate a topic-oriented daily news digest powered by Ollama's web search. The bot searches, fetches, summarises, and renders Markdown (and optional HTML) reports with numbered citations and archived run data for reproducibility.
+
+## Features
+- Topic-based search using `ollama.web_search` with domain preference/exclusion controls
+- Content fetching via `ollama.web_fetch`, triage for duplicates, diversity, and recency
+- Model-driven summarisation with clustered bullets and numeric citations
+- Markdown (and optional HTML) rendering with source appendix and run metadata
+- Timestamped `runs/` directory storing inputs, outputs, and manifest per execution
+- Configurable via environment variables, optional `.env`, and command-line overrides
+
+## Installation
+1. Ensure Python 3.10 or newer is available.
+2. Clone this repository and install the package in editable mode:
+   ```bash
+   pip install -e .
+   ```
+3. Optionally install development extras (pytest, python-dotenv):
+   ```bash
+   pip install -e .[dev]
+   ```
+
+## Configuration
+Environment variables control runtime behaviour. Copy `.env.example` if you want convenient defaults:
+
+```
+cp .env.example .env
+```
+
+Key variables:
+- `OLLAMA_API_KEY` – required for remote Ollama instances (local daemon may not need it)
+- `MODEL` – Ollama model alias (default `qwen3:4b`)
+- `MAX_RESULTS_PER_TOPIC` / `FETCH_LIMIT_PER_TOPIC` – limits per topic (≤10)
+- `PREFER_DOMAINS`, `EXCLUDE_DOMAINS` – comma-separated domain hints
+- `MAX_CHARS_PER_PAGE`, `MAX_BATCH_CHARS` – soft caps for fetch content and prompt batching
+- `OUTPUT_FORMAT` – `md` or `html` (CLI argument takes precedence for HTML output)
+
+## Usage
+Example invocations:
+- Markdown digest for two topics with custom limit:
+  ```bash
+  newsbot --topics "AI policy, renewable energy" --max-results 6 --out digest.md
+  ```
+- Include HTML output and exclude certain domains:
+  ```bash
+  newsbot --topics "UK politics" --html --exclude "reddit.com, medium.com"
+  ```
+- Dry run to inspect search results only:
+  ```bash
+  newsbot --topics "AI" --dry-run
+  ```
+
+### Output structure
+Each run creates `runs/YYYYMMDD_HHMMSS/` containing:
+- `search_<topic>.jsonl` – raw search results
+- `fetch_<topic>.jsonl` – triaged fetch payloads
+- `digest.md` (and `digest.html` when requested)
+- `manifest.json` – metadata (model, timings, file paths)
+
+Markdown digests look like:
+```
+# Daily Digest — 2025-09-26 (Europe/London)
+
+## AI policy
+### Regulatory shifts
+- New policy language appears in the draft bill [1]
+
+## Sources
+- [1] Example Source — https://example.com
+---
+Generated at 2025-09-26T08:30:00+01:00 (Europe/London) using qwen3:4b. Topics: 1; sources: 1.
+```
+
+### Citations & limits
+- Bullets always include numeric markers `[n]` matching the Sources list.
+- Datasets are trimmed by `MAX_CHARS_PER_PAGE` before summarisation; extremely long pages may be chunked.
+- Summaries aim for 3–5 bullets per cluster; overflow is trimmed.
+
+## Ethical considerations
+- Respect publisher terms of service and robots directives.
+- Attribute sources clearly using the generated citations.
+- Use the bot to assist expert judgement; verify contentious claims before redistribution.
+
+## Troubleshooting
+- **Authentication errors** – confirm the Ollama daemon is running and `OLLAMA_API_KEY` (if required) is set.
+- **Empty results** – broaden topics, adjust `--max-results`, or revisit domain filters.
+- **Token/size limits** – decrease `MAX_RESULTS_PER_TOPIC` or `MAX_CHARS_PER_PAGE` to stay within model context.
+- **Network failures** – rerun after transient errors; dry runs retain successful searches for inspection.
+
+## Testing
+Unit tests cover pure helpers and triage heuristics. Run them with:
+```bash
+pytest
+```
+Tests use only synthetic data and do not perform live network calls.

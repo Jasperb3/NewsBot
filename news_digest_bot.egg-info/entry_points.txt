@@ -1,0 +1,2 @@
+[console_scripts]
+newsbot = newsbot.cli:main

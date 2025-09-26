@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "news-digest-bot"
+version = "0.1.0"
+description = "Topic-based daily news digest using Ollama web search"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "News Digest Bot"}]
+license = {text = "MIT"}
+dependencies = [
+    "ollama>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "python-dotenv>=1.0",
+    "pytest>=7",
+]
+test = [
+    "pytest>=7",
+]
+
+[project.scripts]
+newsbot = "newsbot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["newsbot*"]

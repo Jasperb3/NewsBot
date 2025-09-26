@@ -1,0 +1,219 @@
+"""Command-line interface for news-digest-bot."""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from dataclasses import asdict, replace
+import logging
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from .config import AppConfig, load_config
+from .fetch import fetch_pages
+from .log import get_logger
+from .models import ClusterBullet, Digest, TopicSummary
+from .render import render_html, render_markdown
+from .search import search_topic
+from .store import save_manifest, start_run_dir, write_jsonl, write_text
+from .summarise import summarise_topic
+from .utils import split_and_strip_csv
+from .triage import triage_pages
+
+TZ_LONDON = ZoneInfo("Europe/London")
+
+
+def _slugify(text: str) -> str:
+    cleaned = [ch.lower() if ch.isalnum() else "-" for ch in text]
+    slug = "".join(cleaned)
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    slug = slug.strip("-")
+    return slug or "topic"
+
+
+def _prepare_config(cfg: AppConfig, args: argparse.Namespace) -> AppConfig:
+    updated = cfg
+    if args.max_results is not None:
+        max_results = max(1, min(10, args.max_results))
+        updated = replace(updated, max_results_per_topic=max_results, fetch_limit_per_topic=max_results)
+    if args.prefer:
+        prefer = split_and_strip_csv(args.prefer)
+        updated = replace(updated, prefer_domains=prefer)
+    if args.exclude:
+        exclude = split_and_strip_csv(args.exclude)
+        updated = replace(updated, exclude_domains=exclude)
+    return updated
+
+
+def _topics_from_arg(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [topic.strip() for topic in value.split(",") if topic.strip()]
+
+
+def _reindex_citations(summary: TopicSummary, mapping: dict[int, int]) -> None:
+    for cluster in summary.clusters:
+        for bullet in cluster.bullets:
+            new_citations: list[int] = []
+            for citation in bullet.citations:
+                if citation in mapping:
+                    new_citations.append(mapping[citation])
+            bullet.citations = new_citations
+            if hasattr(bullet, "text"):
+                for old, new in mapping.items():
+                    old_marker = f"[{old}]"
+                    new_marker = f"[{new}]"
+                    if old_marker in bullet.text:
+                        bullet.text = bullet.text.replace(old_marker, new_marker)
+
+
+def _log_summary(logger, digest: Digest, run_dir: Path) -> None:
+    logger.info(
+        "Completed run %s: topics=%s sources=%s output=%s",
+        digest.run_id,
+        len(digest.topics),
+        len(digest.sources),
+        run_dir,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Generate topic-based news digests using Ollama search.")
+    parser.add_argument("--topics", required=True, help="Comma-separated list of topics to cover.")
+    parser.add_argument("--max-results", type=int, help="Override maximum results per topic (<=10).")
+    parser.add_argument("--out", default="digest.md", help="Path to copy the final Markdown digest to.")
+    parser.add_argument("--html", action="store_true", help="Render an HTML digest alongside Markdown.")
+    parser.add_argument("--prefer", help="Comma-separated domains to prioritise.")
+    parser.add_argument("--exclude", help="Comma-separated domains to exclude.")
+    parser.add_argument("--corroborate", action="store_true", help="Allow model to call web tools during summarisation.")
+    parser.add_argument("--dry-run", action="store_true", help="Search only; skip fetch and summarise steps.")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging (DEBUG level).")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    topics = _topics_from_arg(args.topics)
+    if not topics:
+        parser.error("At least one topic is required via --topics")
+
+    cfg = load_config()
+
+    logger = get_logger("newsbot")
+    if args.verbose:
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.DEBUG)
+        for handler in root_logger.handlers:
+            handler.setLevel(logging.DEBUG)
+
+    cfg = _prepare_config(cfg, args)
+
+    start_dt = datetime.now(TZ_LONDON)
+    run_dir = start_run_dir()
+    run_id = run_dir.name
+
+    manifest: dict = {
+        "run_id": run_id,
+        "run_time_iso": start_dt.isoformat(),
+        "timezone": cfg.tz,
+        "model": cfg.model,
+        "topics": topics,
+        "dry_run": args.dry_run,
+    }
+
+    aggregated_topics: list[TopicSummary] = []
+    aggregated_sources: list[tuple[int, str, str]] = []
+    elapsed: float | None = None
+
+    start_time = time.perf_counter()
+
+    try:
+        for topic in topics:
+            hits = search_topic(topic, cfg, logger)
+            slug = _slugify(topic)
+            search_file = run_dir / f"search_{slug}.jsonl"
+            write_jsonl(search_file, (asdict(hit) for hit in hits))
+
+            if args.dry_run:
+                continue
+
+            pages = fetch_pages(hits, cfg, logger, topic=topic)
+            triaged = triage_pages(pages)
+            fetch_file = run_dir / f"fetch_{slug}.jsonl"
+            write_jsonl(fetch_file, (asdict(page) for page in triaged))
+
+            summary, sources_table = summarise_topic(topic, triaged, cfg, logger, args.corroborate)
+
+            index_mapping: dict[int, int] = {}
+            for local_idx, title, url in sources_table:
+                global_idx = len(aggregated_sources) + 1
+                aggregated_sources.append((global_idx, title, url))
+                index_mapping[local_idx] = global_idx
+
+            _reindex_citations(summary, index_mapping)
+            aggregated_topics.append(summary)
+
+        elapsed = time.perf_counter() - start_time
+
+        if args.dry_run:
+            manifest.update({"status": "dry-run", "search_files": sorted(p.name for p in run_dir.glob("search_*.jsonl"))})
+            save_manifest(run_dir / "manifest.json", manifest)
+            logger.info("Dry run complete. Search data stored in %s", run_dir)
+            return 0
+
+        digest = Digest(
+            run_id=run_id,
+            run_time_iso=start_dt.isoformat(),
+            timezone=cfg.tz,
+            model=cfg.model,
+            topics=aggregated_topics,
+            sources=aggregated_sources,
+            elapsed_seconds=elapsed,
+        )
+
+        if not digest.topics:
+            logger.error("No summaries were produced; aborting")
+            return 1
+
+        markdown = render_markdown(digest)
+        digest_path = run_dir / "digest.md"
+        write_text(digest_path, markdown)
+
+        out_path = Path(args.out)
+        if out_path != digest_path:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(markdown, encoding="utf-8")
+
+        html_path: Path | None = None
+        if args.html:
+            html = render_html(digest)
+            html_path = run_dir / "digest.html"
+            write_text(html_path, html)
+
+        manifest.update(
+            {
+                "status": "completed",
+                "elapsed_seconds": elapsed,
+                "outputs": {
+                    "markdown": str(digest_path),
+                    "html": str(html_path) if html_path else None,
+                },
+                "sources": len(aggregated_sources),
+            }
+        )
+        save_manifest(run_dir / "manifest.json", manifest)
+
+        _log_summary(logger, digest, run_dir)
+        logger.info("Markdown digest copied to %s", out_path.resolve())
+        return 0
+    except Exception as exc:  # pragma: no cover - top-level safety
+        logger.exception("Run failed: %s", exc)
+        return 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())

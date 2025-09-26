@@ -1,0 +1,8 @@
+ollama>=0.1.0
+
+[dev]
+python-dotenv>=1.0
+pytest>=7
+
+[test]
+pytest>=7
