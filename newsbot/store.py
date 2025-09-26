@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -43,3 +44,14 @@ def write_json(path: Path, payload: dict) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def update_latest_digest(path: Path) -> None:
+    """Copy the latest digest JSON to runs/latest.json for change tracking."""
+
+    latest_path = path.parent.parent / "latest.json"
+    try:
+        shutil.copyfile(path, latest_path)
+    except FileNotFoundError:  # pragma: no cover - best effort
+        latest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, latest_path)

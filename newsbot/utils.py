@@ -10,8 +10,9 @@ if TYPE_CHECKING:  # pragma: no cover - for type hints only
     from .models import ClusterBullet, ClusterSummary
 
 _TRACKING_PARAM_PREFIXES = ("utm_", "icid", "gclid", "fbclid", "mc_cid", "mc_eid")
-_TELEMETRY_PATTERN = re.compile(r"^\s*(?:\w+=[^\s]+(?:\s+|$)){3,}")
+_TELEMETRY_PATTERN = re.compile(r"^\s*(?:\w+=[^\s]+(?:\s+|$)){2,}")
 _TRAILING_CITATIONS_RE = re.compile(r"(\s*(\[[0-9]+\]))+$")
+_CODE_FENCE_RE = re.compile(r"^(```|~~~)([a-zA-Z0-9]*)?$")
 _DATE_IN_LINE = re.compile(r"\b(20\d{2}|19\d{2})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b")
 
 
@@ -125,6 +126,7 @@ def strip_telemetry_lines(text: str) -> str:
         "created_at=",
         "total_duration=",
         "eval_count=",
+        "load_duration=",
     )
     lines = text.splitlines()
     cleaned: list[str] = []
@@ -239,7 +241,10 @@ def truncate_sentence(text: str, max_chars: int) -> str:
         length = pending
     if not acc:
         return clean[: max_chars - 1] + "…"
-    return " ".join(acc).rstrip(".,;:") + "…"
+    truncated = " ".join(acc).rstrip(".,;:")
+    if len(truncated) == len(clean):
+        return truncated
+    return truncated + "…"
 
 
 def strip_trailing_citations(text: str) -> str:
@@ -273,3 +278,31 @@ def first_sentence(text: str) -> str:
     cleaned = normalise_spaces(text)
     match = re.search(r"([^.?!]+[.?!])", cleaned)
     return (match.group(1) if match else cleaned).strip()
+
+
+def strip_code_fences(text: str) -> str:
+    """Remove leading/trailing markdown code fences."""
+
+    if not text:
+        return ""
+    lines = text.splitlines()
+    start = 0
+    end = len(lines)
+    while start < end and _CODE_FENCE_RE.match(lines[start].strip()) and "json" not in lines[start].lower():
+        start += 1
+    while end > start and _CODE_FENCE_RE.match(lines[end - 1].strip()) and "json" not in lines[end - 1].lower():
+        end -= 1
+    return "\n".join(lines[start:end]).strip()
+
+
+def ensure_headline_case(text: str) -> str:
+    """Title-case a headline while preserving all-caps acronyms."""
+
+    words = normalise_spaces(text).split()
+    transformed: list[str] = []
+    for word in words:
+        if len(word) >= 3 and word.isupper():
+            transformed.append(word)
+        else:
+            transformed.append(word.capitalize())
+    return " ".join(transformed)

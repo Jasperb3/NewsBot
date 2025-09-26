@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from html import escape
 from typing import Iterable, Sequence
 
-from .models import ClusterBullet, Digest, TopicSummary
+from .models import ClusterBullet, Digest, Story, TopicSummary
 from .utils import (
     citations_to_domains,
     domain_of,
@@ -18,6 +19,11 @@ from .utils import (
     to_title_case,
     truncate_sentence,
 )
+
+_MAX_AT_A_GLANCE_CHARS = 200
+_MAX_TIMELINE_CHARS = 140
+_MAX_STORY_BULLET_CHARS = 260
+_CITATION_PATTERN = re.compile(r"\[(\d+)\]")
 
 
 def _format_run_date(run_time_iso: str) -> str:
@@ -61,12 +67,26 @@ def _bullet_domains(bullet: ClusterBullet, sources_lookup: dict[int, tuple[str, 
     return sorted_domains(domains)
 
 
+def _extract_citations_from_text(text: str) -> list[int]:
+    return [int(match.group(1)) for match in _CITATION_PATTERN.finditer(text or "")]
+
+
 def _select_at_a_glance(
     topic: TopicSummary,
     sources_lookup: dict[int, tuple[str, str]],
     limit: int = 5,
     max_chars: int = 200,
 ) -> list[tuple[str, list[str]]]:
+    if topic.stories:
+        entries: list[tuple[str, list[str]]] = []
+        for story in topic.stories[:limit]:
+            base = strip_trailing_citations(f"{story.headline} — {story.why}")
+            truncated = truncate_sentence(base, max_chars)
+            truncated = ensure_citation_suffix(truncated, story.source_indices)
+            domains = sorted_domains(citations_to_domains(story.source_indices, sources_lookup))
+            entries.append((truncated, domains))
+        return entries
+
     pool: list[tuple[int, int, int, int, str, list[str]]] = []
     order = 0
     for cluster in topic.clusters:
@@ -92,6 +112,14 @@ def _select_at_a_glance(
     return [(entry[4], entry[5]) for entry in selected]
 
 
+def _format_story_bullet(text: str, sources_lookup: dict[int, tuple[str, str]]) -> tuple[str, list[str]]:
+    citations = _extract_citations_from_text(text)
+    truncated = truncate_sentence(strip_trailing_citations(text), _MAX_STORY_BULLET_CHARS)
+    truncated = ensure_citation_suffix(truncated, citations)
+    domains = sorted_domains(citations_to_domains(citations, sources_lookup))
+    return truncated, domains
+
+
 def _build_timeline(
     topic: TopicSummary,
     sources_lookup: dict[int, tuple[str, str]],
@@ -99,18 +127,39 @@ def _build_timeline(
     max_chars: int = 140,
 ) -> list[tuple[dt.date, str]]:
     seen_dates: dict[dt.date, str] = {}
-    for cluster in topic.clusters:
-        for bullet in cluster.bullets:
-            dates = extract_iso_dates(bullet.text)
-            if not dates or not bullet.citations:
+    if topic.stories:
+        for story in topic.stories:
+            if not story.date:
                 continue
-            latest = max(dates)
-            if latest in seen_dates:
+            try:
+                date_obj = dt.date.fromisoformat(story.date)
+            except ValueError:
                 continue
-            sentence = first_sentence(strip_trailing_citations(bullet.text))
-            truncated = truncate_sentence(sentence, max_chars)
-            gist = ensure_citation_suffix(truncated, [bullet.citations[0]])
-            seen_dates[latest] = gist
+            if date_obj in seen_dates:
+                continue
+            base_text = story.bullets[0] if story.bullets else story.why or story.headline
+            base_text = first_sentence(strip_trailing_citations(base_text))
+            truncated = truncate_sentence(base_text, max_chars)
+            first_citation = story.source_indices[0] if story.source_indices else None
+            if first_citation:
+                truncated = ensure_citation_suffix(truncated, [first_citation])
+            seen_dates[date_obj] = truncated
+    if not seen_dates:
+        for cluster in topic.clusters:
+            for bullet in cluster.bullets:
+                citations = bullet.citations
+                if not citations:
+                    continue
+                dates = extract_iso_dates(bullet.text)
+                if not dates:
+                    continue
+                latest = max(dates)
+                if latest in seen_dates:
+                    continue
+                sentence = first_sentence(strip_trailing_citations(bullet.text))
+                truncated = truncate_sentence(sentence, max_chars)
+                gist = ensure_citation_suffix(truncated, [citations[0]])
+                seen_dates[latest] = gist
     entries = sorted(seen_dates.items(), key=lambda item: item[0], reverse=True)
     return entries[:max_entries]
 
@@ -193,6 +242,28 @@ def render_markdown(digest: Digest) -> str:
             for text, domains in at_a_glance:
                 lines.append(f"- {text}{_markdown_domain_suffix(domains)}")
 
+        if topic.stories:
+            lines.append("### Top stories")
+            for story in topic.stories:
+                headline_text = story.headline
+                if story.urls:
+                    headline_text = f"[{headline_text}]({story.urls[0]})"
+                if story.updated:
+                    headline_text += " _(Updated since last run)_"
+                lines.append(f"#### {headline_text}")
+                story_domains = sorted_domains(citations_to_domains(story.source_indices, sources_lookup))
+                meta_parts = [story.date or "date n/a", f"Sources: {len(story.source_indices)}"]
+                meta_parts.append(
+                    f"Domains: {', '.join(story_domains)}" if story_domains else "Domains: n/a"
+                )
+                lines.append(f"*{' · '.join(meta_parts)}*")
+                if story.update_note:
+                    lines.append(f"*{story.update_note}*")
+                lines.append(f"_Why it matters:_ {story.why}")
+                for bullet_text in story.bullets:
+                    formatted, domains = _format_story_bullet(bullet_text, sources_lookup)
+                    lines.append(f"- {formatted}{_markdown_domain_suffix(domains)}")
+
         timeline_entries = _build_timeline(topic, sources_lookup)
         if timeline_entries:
             lines.append("### Timeline")
@@ -202,6 +273,8 @@ def render_markdown(digest: Digest) -> str:
         if topic.clusters:
             for cluster in topic.clusters:
                 cluster_anchor = _cluster_anchor(topic_anchor, cluster.heading)
+                if topic.stories and cluster.heading.lower() == "top stories":
+                    continue
                 lines.append(f"<a id=\"{cluster_anchor}\"></a>")
                 lines.append(f"### {cluster.heading}")
                 for bullet in cluster.bullets:
@@ -257,6 +330,7 @@ def render_html(digest: Digest) -> str:
         "footer{margin-top:3rem;font-size:0.9rem;color:var(--muted);}"
         ".badge{display:inline-block;border:1px solid var(--border);padding:.15rem .4rem;border-radius:.5rem;margin-right:.4rem;font-size:.85rem;}"
         ".domains{opacity:.75;font-size:.9em;margin-left:.25rem;}"
+        "p.meta{font-size:0.9rem;color:var(--muted);margin:0.2rem 0;}"
         ".back-to-top{margin-top:1rem;display:inline-block;}"
         "@media (prefers-color-scheme: dark){:root{--bg:#111;--fg:#f4f4f4;--accent:#9cc0ff;--border:#333;--muted:#bbb;}}"
         "@media (prefers-color-scheme: light){:root{--bg:#ffffff;--fg:#222;--accent:#3050a0;--border:#ddd;--muted:#666;}}"
@@ -335,6 +409,32 @@ def render_html(digest: Digest) -> str:
                 parts.append(f"        <li>{escape(text)}{_html_domain_suffix(domains)}</li>")
             parts.append("      </ul>")
 
+        if topic.stories:
+            parts.append("      <h3>Top stories</h3>")
+            for story in topic.stories:
+                headline_html = escape(story.headline)
+                if story.urls:
+                    headline_html = f"<a href=\"{escape(story.urls[0])}\">{headline_html}</a>"
+                if story.updated:
+                    headline_html += " <span class=\"badge\">Updated since last run</span>"
+                parts.append(f"      <h4>{headline_html}</h4>")
+                story_domains = sorted_domains(citations_to_domains(story.source_indices, sources_lookup))
+                meta_parts = [escape(story.date or "date n/a"), f"Sources: {len(story.source_indices)}"]
+                meta_parts.append(
+                    escape(", ".join(story_domains)) if story_domains else "Domains: n/a"
+                )
+                parts.append(f"      <p class=\"meta\">{' · '.join(meta_parts)}</p>")
+                if story.update_note:
+                    parts.append(f"      <p><em>{escape(story.update_note)}</em></p>")
+                parts.append(f"      <p><strong>Why it matters:</strong> {escape(story.why)}</p>")
+                parts.append("      <ul>")
+                for bullet_text in story.bullets:
+                    formatted, domains = _format_story_bullet(bullet_text, sources_lookup)
+                    parts.append(
+                        f"        <li>{escape(formatted)}{_html_domain_suffix(domains)}</li>"
+                    )
+                parts.append("      </ul>")
+
         timeline_entries = _build_timeline(topic, sources_lookup)
         if timeline_entries:
             timeline_id = f"timeline-{topic_anchor}"
@@ -349,6 +449,8 @@ def render_html(digest: Digest) -> str:
         if topic.clusters:
             for cluster in topic.clusters:
                 cluster_anchor = _cluster_anchor(topic_anchor, cluster.heading)
+                if topic.stories and cluster.heading.lower() == "top stories":
+                    continue
                 parts.append(
                     f"      <h3 id=\"{escape(cluster_anchor)}\">{escape(cluster.heading)}<button class=\"copy-link\" onclick=\"copyLink('{escape(cluster_anchor)}')\">Copy link</button></h3>"
                 )
@@ -432,6 +534,19 @@ def render_json(digest: Digest) -> dict:
                 "timeline": [
                     {"date": date.isoformat(), "text": gist}
                     for date, gist in timeline_entries
+                ],
+                "stories": [
+                    {
+                        "headline": story.headline,
+                        "date": story.date,
+                        "why": story.why,
+                        "bullets": story.bullets,
+                        "source_indices": story.source_indices,
+                        "urls": story.urls,
+                        "updated": story.updated,
+                        "update_note": story.update_note,
+                    }
+                    for story in topic.stories
                 ],
                 "clusters": [
                     {

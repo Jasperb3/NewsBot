@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import re
 import sys
@@ -18,9 +19,10 @@ from .models import Digest, TopicSummary
 from .metrics import compute_topic_metrics
 from .render import render_html, render_json, render_markdown
 from .search import search_topic
-from .store import save_manifest, start_run_dir, write_json, write_jsonl, write_text
+from .store import save_manifest, start_run_dir, update_latest_digest, write_json, write_jsonl, write_text
 from .summarise import summarise_topic
 from .utils import (
+    canonicalise_url,
     collect_used_citations,
     ensure_citation_suffix,
     split_and_strip_csv,
@@ -61,6 +63,7 @@ def _topics_from_arg(value: str | None) -> list[str]:
 
 
 _MARKER_PATTERN = re.compile(r"\[(\d+)\]")
+_CITATION_RE = re.compile(r"\[(\d+)\]")
 
 
 def _reindex_citations(summary: TopicSummary, mapping: dict[int, int]) -> None:
@@ -141,6 +144,27 @@ def _compact_sources(
                 updated_bullets.append(bullet)
             cluster.bullets = updated_bullets
         summary.clusters = [cluster for cluster in summary.clusters if cluster.bullets]
+        if summary.stories:
+            retained_stories = []
+            for story in summary.stories:
+                mapped_sources = [index_mapping[c] for c in story.source_indices if c in index_mapping]
+                new_bullets: list[str] = []
+                for bullet_text in story.bullets:
+                    citations = [index_mapping[int(match.group(1))] for match in _CITATION_RE.finditer(bullet_text) if int(match.group(1)) in index_mapping]
+                    if not citations:
+                        logger.warning(
+                            "Dropping story bullet without citations in topic '%s': %s",
+                            summary.topic,
+                            bullet_text,
+                        )
+                        continue
+                    refreshed = ensure_citation_suffix(strip_trailing_citations(bullet_text), citations)
+                    new_bullets.append(refreshed)
+                if mapped_sources and new_bullets:
+                    story.source_indices = mapped_sources
+                    story.bullets = new_bullets
+                    retained_stories.append(story)
+            summary.stories = retained_stories
         summary.used_source_indices = sorted(
             {
                 cite
@@ -152,6 +176,96 @@ def _compact_sources(
 
     sources_lookup = {idx: (title, url) for idx, title, url in new_sources}
     return new_sources, sources_lookup
+
+
+def _story_key(headline: str, urls: Sequence[str]) -> str:
+    for url in urls:
+        try:
+            canon = canonicalise_url(url)
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if canon:
+            return f"url::{canon}"
+    slug = re.sub(r"[^a-z0-9]+", "-", headline.lower()).strip("-")
+    return f"title::{slug}"
+
+
+def _load_previous_digest(logger) -> dict | None:
+    latest_path = Path("runs/latest.json")
+    if not latest_path.exists():
+        return None
+    try:
+        return json.loads(latest_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to read previous digest: %s", exc)
+        return None
+
+
+def _index_previous_stories(previous: dict | None) -> dict[str, dict[str, dict]]:
+    index: dict[str, dict[str, dict]] = {}
+    if not previous:
+        return index
+    topics = previous.get("topics") if isinstance(previous, dict) else None
+    if not isinstance(topics, list):
+        return index
+    for topic in topics:
+        if not isinstance(topic, dict):
+            continue
+        name = topic.get("topic")
+        if not name:
+            continue
+        key = _slugify(str(name))
+        stories = topic.get("stories")
+        if not isinstance(stories, list):
+            continue
+        story_map: dict[str, dict] = {}
+        for story in stories:
+            if not isinstance(story, dict):
+                continue
+            headline = story.get("headline")
+            urls = story.get("urls") if isinstance(story.get("urls"), list) else story.get("urls", [])
+            urls = urls or story.get("used_sources")
+            if not isinstance(urls, list):
+                urls = []
+            story_key = _story_key(str(headline or ""), urls)
+            story_map[story_key] = story
+        index[key] = story_map
+    return index
+
+
+def _mark_story_updates(topics: list[TopicSummary], previous_index: dict[str, dict[str, dict]]) -> None:
+    for summary in topics:
+        if not summary.stories:
+            continue
+        topic_key = _slugify(summary.topic)
+        prev_stories = previous_index.get(topic_key, {})
+        for story in summary.stories:
+            story_key = _story_key(story.headline, story.urls)
+            previous_story = prev_stories.get(story_key)
+            if not previous_story:
+                continue
+            changed = False
+            notes: list[str] = []
+            prev_date = previous_story.get("date")
+            if prev_date != story.date and (story.date or prev_date):
+                changed = True
+                if story.date and prev_date:
+                    notes.append(f"Date updated from {prev_date} to {story.date}")
+                elif story.date:
+                    notes.append(f"Date added ({story.date})")
+                else:
+                    notes.append("Date removed")
+            prev_bullets = previous_story.get("bullets")
+            if isinstance(prev_bullets, list):
+                overlap = len(set(prev_bullets) & set(story.bullets))
+                baseline = max(len(prev_bullets), len(story.bullets)) or 1
+                if overlap / baseline < 0.5:
+                    changed = True
+                    notes.append("Content refreshed")
+            if changed:
+                story.updated = True
+                if notes:
+                    story.update_note = "; ".join(notes)
 
 
 def _log_summary(logger, digest: Digest, run_dir: Path) -> None:
@@ -198,6 +312,9 @@ def main(argv: list[str] | None = None) -> int:
             handler.setLevel(logging.DEBUG)
 
     cfg = _prepare_config(cfg, args)
+
+    previous_digest = _load_previous_digest(logger)
+    previous_story_index = _index_previous_stories(previous_digest)
 
     start_dt = datetime.now(TZ_LONDON)
     run_dir = start_run_dir()
@@ -270,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
 
         aggregated_sources, sources_lookup = _compact_sources(aggregated_topics, aggregated_sources, logger)
 
+        _mark_story_updates(aggregated_topics, previous_story_index)
+
         for summary in aggregated_topics:
             compute_topic_metrics(summary, sources_lookup, logger)
 
@@ -318,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
 
         json_payload = render_json(digest)
         write_json(run_dir / "digest.json", json_payload)
+        update_latest_digest(run_dir / "digest.json")
 
         _log_summary(logger, digest, run_dir)
         logger.info("Markdown digest copied to %s", out_path.resolve())

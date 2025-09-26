@@ -4,3 +4,4 @@ __pycache__/
 runs/
 logs/
 .pytest_cache/
+digest.md

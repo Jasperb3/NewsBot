@@ -33,6 +33,18 @@ class ClusterSummary:
 
 
 @dataclass(slots=True)
+class Story:
+    headline: str
+    date: str | None
+    why: str
+    bullets: list[str]
+    source_indices: list[int]
+    urls: list[str]
+    updated: bool = False
+    update_note: str | None = None
+
+
+@dataclass(slots=True)
 class TopicSummary:
     topic: str
     clusters: list[ClusterSummary]
@@ -41,6 +53,7 @@ class TopicSummary:
     coverage_domains: int = 0
     corroborated_bullets: int = 0
     total_bullets: int = 0
+    stories: list[Story] = field(default_factory=list)
 
 
 @dataclass(slots=True)

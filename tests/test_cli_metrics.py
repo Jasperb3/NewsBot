@@ -1,5 +1,6 @@
+from newsbot.cli import _index_previous_stories, _mark_story_updates
 from newsbot.metrics import compute_topic_metrics
-from newsbot.models import ClusterBullet, ClusterSummary, TopicSummary
+from newsbot.models import ClusterBullet, ClusterSummary, Story, TopicSummary
 
 
 class StubLogger:
@@ -37,3 +38,36 @@ def test_confidence_metrics():
     assert summary.corroborated_bullets == 1
     assert summary.total_bullets == 2
     assert not logger.messages
+
+
+def test_story_tracking_updated_badge():
+    story = Story(
+        headline="Energy Policy Shifts",
+        date="2025-09-20",
+        why="New incentives announced",
+        bullets=["Government outlined incentives [1]"],
+        source_indices=[1],
+        urls=["https://example.com/update"],
+    )
+    summary = TopicSummary(topic="Energy", clusters=[], stories=[story])
+
+    previous_digest = {
+        "topics": [
+            {
+                "topic": "Energy",
+                "stories": [
+                    {
+                        "headline": "Energy Policy Shifts",
+                        "date": "2025-09-15",
+                        "bullets": ["Earlier information [1]"],
+                        "urls": ["https://example.com/update"],
+                    }
+                ],
+            }
+        ]
+    }
+
+    index = _index_previous_stories(previous_digest)
+    _mark_story_updates([summary], index)
+
+    assert summary.stories[0].updated is True

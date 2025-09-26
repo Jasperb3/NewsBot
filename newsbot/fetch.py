@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from ollama import web_fetch
+try:  # Optional during offline testing
+    from ollama import web_fetch
+except ImportError:  # pragma: no cover - fallback stub
+    def web_fetch(*args, **kwargs):  # type: ignore
+        raise RuntimeError("ollama package is required for web_fetch at runtime")
 
 from .config import AppConfig
 from .models import FetchedPage, SearchHit
