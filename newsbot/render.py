@@ -78,37 +78,55 @@ def _select_at_a_glance(
     max_chars: int = 200,
 ) -> list[tuple[str, list[str]]]:
     if topic.stories:
-        entries: list[tuple[str, list[str]]] = []
-        for story in topic.stories[:limit]:
+        # Score stories by importance: updated > corroboration > date presence
+        scored_entries: list[tuple[int, int, int, int, str, list[str]]] = []
+        for idx, story in enumerate(topic.stories):
+            # Calculate priority scores (negative for reverse sort)
+            recency_score = -30 if story.updated else 0
+            corroboration_score = -len(story.source_indices) * 5
+            date_score = -10 if story.date else 0
+
             base = strip_trailing_citations(f"{story.headline} — {story.why}")
             truncated = truncate_sentence(base, max_chars)
             truncated = ensure_citation_suffix(truncated, story.source_indices)
             domains = sorted_domains(citations_to_domains(story.source_indices, sources_lookup))
-            entries.append((truncated, domains))
-        return entries
 
+            scored_entries.append((
+                recency_score,
+                corroboration_score,
+                date_score,
+                idx,  # Original order as tiebreaker
+                truncated,
+                domains,
+            ))
+
+        scored_entries.sort()
+        selected = scored_entries[:limit]
+        return [(entry[4], entry[5]) for entry in selected]
+
+    # Cluster-based scoring when no stories exist
     pool: list[tuple[int, int, int, int, str, list[str]]] = []
     order = 0
     for cluster in topic.clusters:
         for bullet in cluster.bullets:
             domains = _bullet_domains(bullet, sources_lookup)
-            base_len = len(normalise_spaces(strip_trailing_citations(bullet.text)))
+            # Prioritize by: more domains > more citations > original order
+            domain_score = -len(domains) * 10
+            citation_score = -len(bullet.citations) * 5
             truncated = _truncate_with_citations(bullet, max_chars)
-            pool.append(
-                (
-                    -len(domains),
-                    base_len,
-                    -len(bullet.citations),
-                    order,
-                    truncated,
-                    domains,
-                )
-            )
+            pool.append((
+                domain_score,
+                citation_score,
+                order,
+                order,  # Duplicate for compatibility
+                truncated,
+                domains,
+            ))
             order += 1
     if not pool:
         return []
     pool.sort()
-    selected = pool[: min(limit, len(pool))]
+    selected = pool[:min(limit, len(pool))]
     return [(entry[4], entry[5]) for entry in selected]
 
 
@@ -164,6 +182,29 @@ def _build_timeline(
     return entries[:max_entries]
 
 
+def _estimate_reading_time(topic: TopicSummary) -> int:
+    """Estimate reading time in minutes (assuming 200 words/min)."""
+    total_words = 0
+
+    # Count words in stories
+    for story in topic.stories:
+        total_words += len(story.headline.split())
+        total_words += len(story.why.split())
+        for bullet in story.bullets:
+            total_words += len(strip_trailing_citations(bullet).split())
+
+    # Count words in clusters
+    for cluster in topic.clusters:
+        total_words += len(cluster.heading.split())
+        for bullet in cluster.bullets:
+            total_words += len(strip_trailing_citations(bullet.text).split())
+
+    # Account for "Further reading" section (estimated 5 words per entry)
+    total_words += len(topic.unused_sources) * 5
+
+    return max(1, total_words // 200)
+
+
 def _topic_badge_texts(topic: TopicSummary) -> tuple[str, list[str]]:
     sources_count = len(topic.used_source_indices)
     domains_count = topic.coverage_domains
@@ -200,6 +241,51 @@ def _prepare_further_reading(topic: TopicSummary) -> tuple[list[tuple[str, str, 
     return capped, remaining
 
 
+def _generate_executive_summary(digest: Digest, limit: int = 5) -> list[tuple[str, str]]:
+    """Extract top stories across all topics for executive summary."""
+    all_entries: list[tuple[int, int, int, str, str]] = []
+
+    for topic in digest.topics:
+        if topic.stories:
+            # Use stories if available
+            for story in topic.stories:
+                # Score: updated=30, corroboration=5 per source, has_date=10
+                recency_score = -30 if story.updated else 0
+                corroboration_score = -len(story.source_indices) * 5
+                date_score = -10 if story.date else 0
+                score = recency_score + corroboration_score + date_score
+
+                summary = strip_trailing_citations(f"{story.headline} — {story.why}")
+                all_entries.append((
+                    score,
+                    recency_score,
+                    corroboration_score,
+                    to_title_case(topic.topic),
+                    summary,
+                ))
+        else:
+            # Fall back to top cluster bullets
+            for cluster in topic.clusters[:1]:  # Only first cluster
+                for bullet in cluster.bullets[:2]:  # Top 2 bullets
+                    citation_score = -len(bullet.citations) * 5
+                    all_entries.append((
+                        citation_score,
+                        0,
+                        citation_score,
+                        to_title_case(topic.topic),
+                        strip_trailing_citations(bullet.text),
+                    ))
+
+    if not all_entries:
+        return []
+
+    # Sort by score (most important first)
+    all_entries.sort()
+    selected = all_entries[:limit]
+
+    return [(topic, summary) for _, _, _, topic, summary in selected]
+
+
 def render_markdown(digest: Digest) -> str:
     """Render the digest to Markdown."""
 
@@ -214,11 +300,21 @@ def render_markdown(digest: Digest) -> str:
         summary_line += f"; Elapsed: {digest.elapsed_seconds:.1f}s"
     lines.append(summary_line)
 
+    # Add executive summary if there are multiple topics or stories
+    if len(digest.topics) > 1 or any(topic.stories for topic in digest.topics):
+        exec_summary = _generate_executive_summary(digest)
+        if exec_summary:
+            lines.append("")
+            lines.append("## Executive Summary")
+            for topic_name, summary_text in exec_summary:
+                lines.append(f"- **{topic_name}:** {summary_text}")
+
     lines.append("")
     lines.append("## Table of Contents")
     for topic in digest.topics:
         topic_anchor = _topic_anchor(topic)
-        lines.append(f"- [{to_title_case(topic.topic)}](#{topic_anchor})")
+        reading_time = _estimate_reading_time(topic)
+        lines.append(f"- [{to_title_case(topic.topic)}](#{topic_anchor}) _~{reading_time} min read_")
         for cluster in topic.clusters:
             cluster_anchor = _cluster_anchor(topic_anchor, cluster.heading)
             lines.append(f"  - [{cluster.heading}](#{cluster_anchor})")
@@ -360,12 +456,25 @@ def render_html(digest: Digest) -> str:
     parts.extend(["  <nav>", "    <ul>"])
     for topic in digest.topics:
         anchor = _topic_anchor(topic)
-        parts.append(f"      <li><a href=\"#{escape(anchor)}\">{escape(to_title_case(topic.topic))}</a></li>")
+        reading_time = _estimate_reading_time(topic)
+        parts.append(f"      <li><a href=\"#{escape(anchor)}\">{escape(to_title_case(topic.topic))} <span style=\"opacity:0.7;font-size:0.85em\">(~{reading_time} min)</span></a></li>")
     parts.extend(["    </ul>", "  </nav>"])
 
     parts.append("  <main>")
     parts.append(f"    <h1>Daily Digest — {escape(run_date)} ({escape(digest.timezone)})</h1>")
     parts.append(f"    <p>{escape(summary_line)}</p>")
+
+    # Add executive summary if there are multiple topics or stories
+    if len(digest.topics) > 1 or any(topic.stories for topic in digest.topics):
+        exec_summary = _generate_executive_summary(digest)
+        if exec_summary:
+            parts.append("    <section>")
+            parts.append("      <h2 id=\"executive-summary\">Executive Summary</h2>")
+            parts.append("      <ul>")
+            for topic_name, summary_text in exec_summary:
+                parts.append(f"        <li><strong>{escape(topic_name)}:</strong> {escape(summary_text)}</li>")
+            parts.append("      </ul>")
+            parts.append("    </section>")
 
     parts.append("    <section>")
     parts.append("      <h2 id=\"table-of-contents\">Table of Contents</h2>")

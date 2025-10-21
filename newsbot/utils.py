@@ -208,7 +208,9 @@ def ensure_citation_suffix(text: str, citations: Sequence[int]) -> str:
 
     if not citations:
         return text.strip()
-    markers = "".join(f"[{idx}]" for idx in citations)
+    # Deduplicate citations while preserving order
+    unique_citations = sorted(dict.fromkeys(citations))
+    markers = "".join(f"[{idx}]" for idx in unique_citations)
     stripped = text.rstrip()
     if stripped.endswith(markers):
         return stripped
