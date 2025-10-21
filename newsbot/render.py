@@ -764,10 +764,16 @@ def render_json(digest: Digest) -> dict:
                     {"text": text, "domains": domains}
                     for text, domains in at_a_glance
                 ],
-                "timeline": [
-                    {"date": date.isoformat(), "text": gist}
-                    for date, gist in timeline_entries
-                ],
+                "timeline": {
+                    "recent": [
+                        {"date": date.isoformat(), "text": gist}
+                        for date, gist in timeline_entries.get('recent', [])
+                    ],
+                    "historical": [
+                        {"date": date.isoformat(), "text": gist}
+                        for date, gist in timeline_entries.get('historical', [])
+                    ],
+                },
                 "stories": [
                     {
                         "headline": story.headline,
