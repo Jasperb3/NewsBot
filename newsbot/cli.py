@@ -408,6 +408,11 @@ def main(argv: list[str] | None = None) -> int:
 
         _mark_story_updates(aggregated_topics, previous_story_index)
 
+        # Sort stories by importance score
+        for summary in aggregated_topics:
+            if summary.stories:
+                summary.stories.sort(key=lambda s: s.calculate_importance(), reverse=True)
+
         for summary in aggregated_topics:
             compute_topic_metrics(summary, sources_lookup, logger)
 

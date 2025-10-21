@@ -43,6 +43,39 @@ class Story:
     updated: bool = False
     update_note: str | None = None
 
+    def calculate_importance(self) -> float:
+        """Calculate importance score (0-100) based on multiple factors."""
+        score = 0.0
+
+        # Corroboration (0-40 points): More sources = higher confidence
+        corroboration = min(len(self.source_indices) * 10, 40)
+        score += corroboration
+
+        # Recency (0-30 points): Updated content is more important
+        if self.updated:
+            score += 30
+
+        # Date presence (0-10 points): Stories with dates are more time-sensitive
+        if self.date:
+            score += 10
+            # Additional recency boost for very recent dates
+            try:
+                import datetime as dt
+                date_obj = dt.date.fromisoformat(self.date)
+                days_old = (dt.date.today() - date_obj).days
+                if days_old <= 7:
+                    score += 10  # Very recent
+                elif days_old <= 30:
+                    score += 5   # Recent
+            except (ValueError, ImportError):
+                pass
+
+        # Content depth (0-20 points): More bullets = more comprehensive
+        bullet_score = min(len(self.bullets) * 5, 20)
+        score += bullet_score
+
+        return score
+
 
 @dataclass(slots=True)
 class TopicSummary:
