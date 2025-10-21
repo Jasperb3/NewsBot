@@ -143,7 +143,8 @@ def _build_timeline(
     sources_lookup: dict[int, tuple[str, str]],
     max_entries: int = 8,
     max_chars: int = 140,
-) -> list[tuple[dt.date, str]]:
+) -> dict[str, list[tuple[dt.date, str]]]:
+    """Build timeline grouped into recent and historical sections."""
     seen_dates: dict[dt.date, str] = {}
     if topic.stories:
         for story in topic.stories:
@@ -178,8 +179,19 @@ def _build_timeline(
                 truncated = truncate_sentence(sentence, max_chars)
                 gist = ensure_citation_suffix(truncated, [citations[0]])
                 seen_dates[latest] = gist
-    entries = sorted(seen_dates.items(), key=lambda item: item[0], reverse=True)
-    return entries[:max_entries]
+
+    # Group into recent and historical
+    import datetime as dt_module
+    recent_cutoff = dt_module.date.today() - dt_module.timedelta(days=30)
+    all_entries = sorted(seen_dates.items(), key=lambda item: item[0], reverse=True)
+
+    recent = [(d, text) for d, text in all_entries if d >= recent_cutoff]
+    historical = [(d, text) for d, text in all_entries if d < recent_cutoff]
+
+    return {
+        'recent': recent[:max_entries // 2] if recent else [],
+        'historical': historical[:max_entries // 2] if historical else [],
+    }
 
 
 def _estimate_reading_time(topic: TopicSummary) -> int:
@@ -220,13 +232,17 @@ def _topic_badge_texts(topic: TopicSummary) -> tuple[str, list[str]]:
 
 
 def _markdown_domain_suffix(domains: Sequence[str]) -> str:
-    return f" — {', '.join(domains)}" if domains else ""
+    if not domains:
+        return ""
+    badged_domains = [_add_source_quality_badge(d) for d in domains]
+    return f" — {', '.join(badged_domains)}"
 
 
 def _html_domain_suffix(domains: Sequence[str]) -> str:
     if not domains:
         return ""
-    return f"<span class=\"domains\">· {escape(', '.join(domains))}</span>"
+    badged_domains = [_add_source_quality_badge(d) for d in domains]
+    return f"<span class=\"domains\">· {escape(', '.join(badged_domains))}</span>"
 
 
 def _prepare_further_reading(topic: TopicSummary) -> tuple[list[tuple[str, str, str]], int]:
@@ -286,6 +302,70 @@ def _generate_executive_summary(digest: Digest, limit: int = 5) -> list[tuple[st
     return [(topic, summary) for _, _, _, topic, summary in selected]
 
 
+def _compute_confidence_level(source_count: int) -> str:
+    """Compute confidence level based on number of independent sources."""
+    if source_count >= 4:
+        return f"High - {source_count} independent sources"
+    elif source_count >= 2:
+        return f"Medium - {source_count} sources"
+    else:
+        return "Low - Single source report"
+
+
+def _add_source_quality_badge(domain: str) -> str:
+    """Add quality indicator badge based on source type."""
+    # Trusted news sources
+    trusted_news = {
+        'reuters.com', 'apnews.com', 'bbc.co.uk', 'bbc.com',
+        'npr.org', 'pbs.org', 'theguardian.com', 'ft.com',
+        'wsj.com', 'economist.com', 'nature.com', 'science.org'
+    }
+
+    # Check for trusted news
+    if domain in trusted_news:
+        return f"⭐ {domain}"
+
+    # Check for official sources (.gov, .mil, international orgs)
+    if any(domain.endswith(suffix) for suffix in ['.gov', '.mil', '.int']):
+        return f"🏛️ {domain}"
+
+    # Check for academic sources
+    if domain.endswith('.edu') or domain.endswith('.ac.uk'):
+        return f"🎓 {domain}"
+
+    # Check for specific official organizations
+    official_orgs = ['un.org', 'who.int', 'europa.eu', 'oecd.org', 'worldbank.org', 'imf.org']
+    if any(org in domain for org in official_orgs):
+        return f"🏛️ {domain}"
+
+    # Default: no badge
+    return domain
+
+
+def _compute_digest_statistics(digest: Digest) -> dict[str, int | float]:
+    """Compute summary statistics for the digest."""
+    total_bullets = sum(t.total_bullets or 0 for t in digest.topics)
+    total_corroborated = sum(t.corroborated_bullets for t in digest.topics)
+
+    updated_stories = sum(
+        len([s for s in t.stories if s.updated])
+        for t in digest.topics
+    )
+
+    all_domains = {domain_of(url) for _, _, url in digest.sources}
+
+    return {
+        'topics': len(digest.topics),
+        'sources': len(digest.sources),
+        'domains': len(all_domains),
+        'corroboration_rate': (total_corroborated / total_bullets * 100) if total_bullets else 0,
+        'avg_sources_per_topic': len(digest.sources) / len(digest.topics) if digest.topics else 0,
+        'updated_count': updated_stories,
+        'total_bullets': total_bullets,
+        'corroborated_bullets': total_corroborated,
+    }
+
+
 def render_markdown(digest: Digest) -> str:
     """Render the digest to Markdown."""
 
@@ -308,6 +388,15 @@ def render_markdown(digest: Digest) -> str:
             lines.append("## Executive Summary")
             for topic_name, summary_text in exec_summary:
                 lines.append(f"- **{topic_name}:** {summary_text}")
+
+    # Add digest statistics dashboard
+    stats = _compute_digest_statistics(digest)
+    lines.append("")
+    lines.append("## Digest Overview")
+    lines.append(f"📊 **Coverage:** {stats['topics']} topics · {stats['sources']} sources · {stats['domains']} unique domains")
+    lines.append(f"🔍 **Quality:** {stats['corroboration_rate']:.0f}% corroboration rate · {stats['avg_sources_per_topic']:.1f} sources/topic avg")
+    if stats['updated_count'] > 0:
+        lines.append(f"⏱️ **Recency:** {stats['updated_count']} {'story' if stats['updated_count'] == 1 else 'stories'} updated since last run")
 
     lines.append("")
     lines.append("## Table of Contents")
@@ -348,11 +437,15 @@ def render_markdown(digest: Digest) -> str:
                     headline_text += " _(Updated since last run)_"
                 lines.append(f"#### {headline_text}")
                 story_domains = sorted_domains(citations_to_domains(story.source_indices, sources_lookup))
+                badged_domains = [_add_source_quality_badge(d) for d in story_domains]
                 meta_parts = [story.date or "date n/a", f"Sources: {len(story.source_indices)}"]
                 meta_parts.append(
-                    f"Domains: {', '.join(story_domains)}" if story_domains else "Domains: n/a"
+                    f"Domains: {', '.join(badged_domains)}" if badged_domains else "Domains: n/a"
                 )
                 lines.append(f"*{' · '.join(meta_parts)}*")
+                # Add confidence indicator
+                confidence = _compute_confidence_level(len(story.source_indices))
+                lines.append(f"*Confidence: {confidence}*")
                 if story.update_note:
                     lines.append(f"*{story.update_note}*")
                 lines.append(f"_Why it matters:_ {story.why}")
@@ -360,11 +453,19 @@ def render_markdown(digest: Digest) -> str:
                     formatted, domains = _format_story_bullet(bullet_text, sources_lookup)
                     lines.append(f"- {formatted}{_markdown_domain_suffix(domains)}")
 
-        timeline_entries = _build_timeline(topic, sources_lookup)
-        if timeline_entries:
+        timeline = _build_timeline(topic, sources_lookup)
+        if timeline['recent'] or timeline['historical']:
             lines.append("### Timeline")
-            for date_obj, gist in timeline_entries:
-                lines.append(f"- {date_obj.isoformat()} — {gist}")
+            if timeline['recent']:
+                lines.append("**Recent developments:**")
+                for date_obj, gist in timeline['recent']:
+                    lines.append(f"- {date_obj.isoformat()} — {gist}")
+            if timeline['historical']:
+                if timeline['recent']:
+                    lines.append("")
+                lines.append("**Historical context:**")
+                for date_obj, gist in timeline['historical']:
+                    lines.append(f"- {date_obj.isoformat()} — {gist}")
 
         if topic.clusters:
             for cluster in topic.clusters:
@@ -476,6 +577,17 @@ def render_html(digest: Digest) -> str:
             parts.append("      </ul>")
             parts.append("    </section>")
 
+    # Add digest statistics dashboard
+    stats = _compute_digest_statistics(digest)
+    parts.append("    <section>")
+    parts.append("      <h2 id=\"digest-overview\">Digest Overview</h2>")
+    parts.append(f"      <p>📊 <strong>Coverage:</strong> {stats['topics']} topics · {stats['sources']} sources · {stats['domains']} unique domains</p>")
+    parts.append(f"      <p>🔍 <strong>Quality:</strong> {stats['corroboration_rate']:.0f}% corroboration rate · {stats['avg_sources_per_topic']:.1f} sources/topic avg</p>")
+    if stats['updated_count'] > 0:
+        story_word = 'story' if stats['updated_count'] == 1 else 'stories'
+        parts.append(f"      <p>⏱️ <strong>Recency:</strong> {stats['updated_count']} {story_word} updated since last run</p>")
+    parts.append("    </section>")
+
     parts.append("    <section>")
     parts.append("      <h2 id=\"table-of-contents\">Table of Contents</h2>")
     parts.append("      <ul>")
@@ -528,11 +640,15 @@ def render_html(digest: Digest) -> str:
                     headline_html += " <span class=\"badge\">Updated since last run</span>"
                 parts.append(f"      <h4>{headline_html}</h4>")
                 story_domains = sorted_domains(citations_to_domains(story.source_indices, sources_lookup))
+                badged_domains = [_add_source_quality_badge(d) for d in story_domains]
                 meta_parts = [escape(story.date or "date n/a"), f"Sources: {len(story.source_indices)}"]
                 meta_parts.append(
-                    escape(", ".join(story_domains)) if story_domains else "Domains: n/a"
+                    escape(", ".join(badged_domains)) if badged_domains else "Domains: n/a"
                 )
                 parts.append(f"      <p class=\"meta\">{' · '.join(meta_parts)}</p>")
+                # Add confidence indicator
+                confidence = _compute_confidence_level(len(story.source_indices))
+                parts.append(f"      <p class=\"meta\">Confidence: {escape(confidence)}</p>")
                 if story.update_note:
                     parts.append(f"      <p><em>{escape(story.update_note)}</em></p>")
                 parts.append(f"      <p><strong>Why it matters:</strong> {escape(story.why)}</p>")
@@ -544,16 +660,24 @@ def render_html(digest: Digest) -> str:
                     )
                 parts.append("      </ul>")
 
-        timeline_entries = _build_timeline(topic, sources_lookup)
-        if timeline_entries:
+        timeline = _build_timeline(topic, sources_lookup)
+        if timeline['recent'] or timeline['historical']:
             timeline_id = f"timeline-{topic_anchor}"
             parts.append(
                 f"      <h3 id=\"{escape(timeline_id)}\">Timeline<button class=\"copy-link\" onclick=\"copyLink('{escape(timeline_id)}')\">Copy link</button></h3>"
             )
-            parts.append("      <ul>")
-            for date_obj, gist in timeline_entries:
-                parts.append(f"        <li>{escape(date_obj.isoformat())} — {escape(gist)}</li>")
-            parts.append("      </ul>")
+            if timeline['recent']:
+                parts.append("      <p><strong>Recent developments:</strong></p>")
+                parts.append("      <ul>")
+                for date_obj, gist in timeline['recent']:
+                    parts.append(f"        <li>{escape(date_obj.isoformat())} — {escape(gist)}</li>")
+                parts.append("      </ul>")
+            if timeline['historical']:
+                parts.append("      <p><strong>Historical context:</strong></p>")
+                parts.append("      <ul>")
+                for date_obj, gist in timeline['historical']:
+                    parts.append(f"        <li>{escape(date_obj.isoformat())} — {escape(gist)}</li>")
+                parts.append("      </ul>")
 
         if topic.clusters:
             for cluster in topic.clusters:
