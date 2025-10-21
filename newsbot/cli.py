@@ -246,6 +246,8 @@ def _mark_story_updates(topics: list[TopicSummary], previous_index: dict[str, di
                 continue
             changed = False
             notes: list[str] = []
+
+            # Check date changes
             prev_date = previous_story.get("date")
             if prev_date != story.date and (story.date or prev_date):
                 changed = True
@@ -255,13 +257,30 @@ def _mark_story_updates(topics: list[TopicSummary], previous_index: dict[str, di
                     notes.append(f"Date added ({story.date})")
                 else:
                     notes.append("Date removed")
+
+            # Check bullet changes with detailed diff
             prev_bullets = previous_story.get("bullets")
             if isinstance(prev_bullets, list):
-                overlap = len(set(prev_bullets) & set(story.bullets))
-                baseline = max(len(prev_bullets), len(story.bullets)) or 1
-                if overlap / baseline < 0.5:
+                # Normalize bullets for comparison (strip citations)
+                prev_set = {strip_trailing_citations(b) for b in prev_bullets}
+                curr_set = {strip_trailing_citations(b) for b in story.bullets}
+
+                added = curr_set - prev_set
+                removed = prev_set - curr_set
+
+                if added or removed:
+                    changed = True
+                    change_parts = []
+                    if added:
+                        change_parts.append(f"{len(added)} new bullet{'s' if len(added) > 1 else ''}")
+                    if removed:
+                        change_parts.append(f"{len(removed)} removed")
+                    notes.append("Content updated: " + ", ".join(change_parts))
+                elif len(prev_bullets) != len(story.bullets):
+                    # Bullet count changed but no content diff (citation updates only)
                     changed = True
                     notes.append("Content refreshed")
+
             if changed:
                 story.updated = True
                 if notes:
