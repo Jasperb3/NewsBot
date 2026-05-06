@@ -67,21 +67,35 @@ _CITATION_RE = re.compile(r"\[(\d+)\]")
 
 
 def _reindex_citations(summary: TopicSummary, mapping: dict[int, int]) -> None:
-    """Update bullet citations to global indices, pruning unmapped markers."""
+    """Update all citations (clusters and stories) from local to global indices."""
+
+    def _apply(text: str) -> str:
+        def _replace(match: re.Match[str]) -> str:
+            idx = int(match.group(1))
+            return f"[{mapping[idx]}]" if idx in mapping else ""
+        return _MARKER_PATTERN.sub(_replace, text)
 
     for cluster in summary.clusters:
         for bullet in cluster.bullets:
             mapped = [mapping[idx] for idx in bullet.citations if idx in mapping]
-
-            def _replace(match: re.Match[str]) -> str:
-                idx = int(match.group(1))
-                if idx in mapping:
-                    return f"[{mapping[idx]}]"
-                return ""
-
-            bullet.text = _MARKER_PATTERN.sub(_replace, bullet.text)
+            bullet.text = ensure_citation_suffix(_apply(strip_trailing_citations(bullet.text)), mapped)
             bullet.citations = mapped
-            bullet.text = ensure_citation_suffix(bullet.text, bullet.citations)
+
+    for story in summary.stories:
+        story.source_indices = [mapping[idx] for idx in story.source_indices if idx in mapping]
+        new_bullets = []
+        for bullet_text in story.bullets:
+            mapped_cits = sorted({
+                mapping[int(m.group(1))]
+                for m in _MARKER_PATTERN.finditer(bullet_text)
+                if int(m.group(1)) in mapping
+            })
+            if not mapped_cits:
+                continue
+            new_bullets.append(
+                ensure_citation_suffix(_apply(strip_trailing_citations(bullet_text)), mapped_cits)
+            )
+        story.bullets = new_bullets
 
 
 def _prune_empty_bullets(summary: TopicSummary, logger) -> None:

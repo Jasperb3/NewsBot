@@ -1,4 +1,4 @@
-from newsbot.cli import _index_previous_stories, _mark_story_updates
+from newsbot.cli import _index_previous_stories, _mark_story_updates, _reindex_citations
 from newsbot.metrics import compute_topic_metrics
 from newsbot.models import ClusterBullet, ClusterSummary, Story, TopicSummary
 
@@ -38,6 +38,37 @@ def test_confidence_metrics():
     assert summary.corroborated_bullets == 1
     assert summary.total_bullets == 2
     assert not logger.messages
+
+
+def test_reindex_citations_updates_story_source_indices():
+    # Simulates second topic: local source [1] = OBR, but global should be [2]
+    story = Story(
+        headline="OBR Forecast",
+        date=None,
+        why="It matters.",
+        bullets=["GDP growth expected [1]", "Inflation forecast revised [1]"],
+        source_indices=[1],
+        urls=["https://obr.uk/forecast"],
+    )
+    cluster = ClusterSummary(
+        heading="Economy",
+        bullets=[ClusterBullet(text="OBR forecasts GDP [1]", citations=[1])],
+    )
+    summary = TopicSummary(topic="UK economy", clusters=[cluster], stories=[story])
+    mapping = {1: 2}  # local 1 → global 2
+
+    _reindex_citations(summary, mapping)
+
+    # Cluster bullets must be updated
+    assert summary.clusters[0].bullets[0].citations == [2]
+    assert "[2]" in summary.clusters[0].bullets[0].text
+
+    # Stories must ALSO be updated — this is what was broken
+    assert summary.stories[0].source_indices == [2], (
+        "story.source_indices not remapped: still has local index, causing cross-topic contamination"
+    )
+    assert "[2]" in summary.stories[0].bullets[0]
+    assert "[1]" not in summary.stories[0].bullets[0]
 
 
 def test_story_tracking_updated_badge():
