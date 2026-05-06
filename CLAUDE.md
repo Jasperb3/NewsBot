@@ -44,7 +44,7 @@ pip install -e .[dev]     # With dev dependencies
 
 ### Testing
 ```bash
-pytest                    # Run all 28 tests (should all pass)
+pytest                    # Run all 89 tests (should all pass)
 make test
 ```
 
@@ -114,16 +114,38 @@ On each run, `cli.py` loads `runs/latest.json` and flags stories with `updated=T
 - **Source Quality Badges**: ⭐ trusted news, 🏛️ official (.gov/.int), 🎓 academic (.edu/.ac.uk)
 - **Update Notes**: "What changed" shown inline under updated stories
 
-### Not Yet Implemented (Priority 3)
-- Cross-topic connection detection (shared sources across topics)
-- Contradiction detection between bullets
-- Semantic clustering validation (coherence scoring)
-- n-gram content similarity for enhanced deduplication
+### Priority 3 Features (all implemented)
+
+**Cross-topic connections** (`render.py:_find_topic_connections`)
+- Links topics sharing ≥2 source indices; sorted by overlap count, capped at 3
+- Renders `_Related topics: Energy (3 shared sources)_` below each topic header
+
+**Contradiction detection** (`render.py:_detect_contradictions`)
+- Flags bullet pairs from *different* source sets that contain adversative markers (`however`, `but`, `despite`, `contrary`, `although`)
+- Renders a `### Potential Discrepancies` section with `⚠️` notes per topic; capped at 3
+
+**Semantic clustering validation** (`summarise.py:_validate_cluster_coherence`, `flag_fragmented_clusters`)
+- `_validate_cluster_coherence(cluster)` → 0–1 pairwise Jaccard similarity of citation sets across bullets
+- `flag_fragmented_clusters(clusters)` → appends `(Loosely related)` to cluster headings where coherence < 0.3
+- Call `flag_fragmented_clusters` in `cli.py` on a topic's clusters after `summarise_topic` returns to label fragmentary LLM output
+
+**Content-similarity deduplication** (`triage.py:dedupe_by_content_similarity`)
+- `_content_similarity(p1, p2)` → 3-gram Jaccard on first 1000 characters
+- `dedupe_by_content_similarity(pages)` → drops pages with >80% overlap to any already-kept page; first-seen wins
+- Wired into `triage_pages()` as a step after title dedup
 
 ## Testing Strategy
-- 28 unit tests, all passing (`pytest` with no arguments)
+- 89 tests, all passing (`pytest` with no arguments)
 - No live network calls — synthetic fixtures only
-- Test files: `test_cli_metrics.py`, `test_fetch.py`, `test_render.py`, `test_search.py`, `test_summarise.py`, `test_triage.py`, `test_utils.py`
+- Test files:
+  - `test_cli_metrics.py` — story tracking and confidence metrics
+  - `test_fetch.py` — retry logic and snippet fallback
+  - `test_render.py` — core rendering correctness
+  - `test_render_integration.py` — all Priority 1/2/3 render functions (61 tests)
+  - `test_search.py` — search result parsing variants
+  - `test_summarise.py` — JSON parsing, cluster coherence validation
+  - `test_triage.py` — deduplication, diversity, content similarity
+  - `test_utils.py` — URL canonicalisation, citation helpers
 - `conftest.py` provides shared fixtures
 
 ## Content Limits and Batching
