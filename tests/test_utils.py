@@ -6,6 +6,7 @@ from newsbot.utils import (
     domain_of,
     extract_iso_dates,
     split_and_strip_csv,
+    to_title_case,
 )
 
 
@@ -33,6 +34,24 @@ def test_extract_iso_dates_picks_valid_dates():
 def test_chunk_texts_by_char_limit_batches_sequences():
     texts = ["a" * 5, "b" * 4, "c" * 9]
     assert chunk_texts_by_char_limit(texts, max_chars=10) == [["aaaaa", "bbbb"], ["ccccccccc"]]
+
+
+def test_to_title_case_preserves_two_letter_acronyms():
+    assert to_title_case("AI regulation") == "AI Regulation"
+    assert to_title_case("UK economy") == "UK Economy"
+    assert to_title_case("EU policy") == "EU Policy"
+    assert to_title_case("US markets") == "US Markets"
+
+
+def test_to_title_case_preserves_longer_acronyms():
+    assert to_title_case("OBR forecast") == "OBR Forecast"
+    assert to_title_case("GDP growth") == "GDP Growth"
+    assert to_title_case("NATO summit") == "NATO Summit"
+
+
+def test_to_title_case_capitalises_normal_words():
+    assert to_title_case("renewable energy") == "Renewable Energy"
+    assert to_title_case("world cup") == "World Cup"
 
 
 def test_chunk_texts_by_char_limit_splits_large_entry():

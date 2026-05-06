@@ -261,7 +261,7 @@ def to_title_case(text: str) -> str:
     words = text.split()
     titled: list[str] = []
     for word in words:
-        if len(word) >= 3 and word.isupper():
+        if len(word) >= 2 and word.isupper():
             titled.append(word)
         else:
             titled.append(word.capitalize())
