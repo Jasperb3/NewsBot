@@ -104,8 +104,9 @@ def test_timeline_is_terse():
     )
     sources_lookup = {idx: (title, url) for idx, title, url in digest.sources}
     timeline = _build_timeline(topic, sources_lookup)
-    assert timeline[0][0] == dt.date(2025, 9, 20)
-    assert "[1]" in timeline[0][1]
-    assert "[2]" not in timeline[0][1]
-    assert len(timeline[0][1]) <= 170  # terseness check
+    all_entries = timeline.get("recent", []) + timeline.get("historical", [])
+    assert all_entries[0][0] == dt.date(2025, 9, 20)
+    assert "[1]" in all_entries[0][1]
+    assert "[2]" not in all_entries[0][1]
+    assert len(all_entries[0][1]) <= 170  # terseness check
 

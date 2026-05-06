@@ -18,6 +18,7 @@ class FetchedPage:
     content: str
     links: list[str]
     topic: str
+    is_snippet: bool = False
 
 
 @dataclass(slots=True)
