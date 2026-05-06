@@ -385,6 +385,27 @@ def _stories_to_clusters(stories: Sequence[Story]) -> list[ClusterSummary]:
     return [ClusterSummary(heading="Top Stories", bullets=bullets)] if bullets else []
 
 
+def _validate_cluster_coherence(cluster: ClusterSummary) -> float:
+    """Return Jaccard citation similarity across all bullet pairs (0–1)."""
+    if len(cluster.bullets) <= 1:
+        return 1.0
+    citation_sets = [set(b.citations) for b in cluster.bullets]
+    similarities: list[float] = []
+    for i, c1 in enumerate(citation_sets):
+        for c2 in citation_sets[i + 1:]:
+            union = c1 | c2
+            similarities.append(len(c1 & c2) / len(union) if union else 0.0)
+    return sum(similarities) / len(similarities) if similarities else 0.0
+
+
+def flag_fragmented_clusters(clusters: list[ClusterSummary]) -> list[ClusterSummary]:
+    """Append '(Loosely related)' to headings of low-coherence clusters."""
+    for cluster in clusters:
+        if _validate_cluster_coherence(cluster) < 0.3:
+            cluster.heading += " (Loosely related)"
+    return clusters
+
+
 def summarise_topic(
     topic: str,
     pages: list[FetchedPage],

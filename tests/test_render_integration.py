@@ -1,4 +1,4 @@
-"""Integration tests for render.py feature functions added in Priority 1 & 2 improvements."""
+"""Integration tests for render.py feature functions added in Priority 1, 2 & 3 improvements."""
 import datetime as dt
 
 import pytest
@@ -8,6 +8,8 @@ from newsbot.render import (
     _add_source_quality_badge,
     _build_timeline,
     _compute_confidence_level,
+    _detect_contradictions,
+    _find_topic_connections,
     _compute_digest_statistics,
     _estimate_reading_time,
     _generate_executive_summary,
@@ -443,3 +445,147 @@ def test_markdown_digest_overview_shows_updated_count_when_nonzero():
     digest = _digest([topic])
     md = render_markdown(digest)
     assert "updated since last run" in md.lower()
+
+
+# ---------------------------------------------------------------------------
+# Priority 3 — _find_topic_connections
+# ---------------------------------------------------------------------------
+
+def _topic_with_sources(name: str, indices: list[int]) -> TopicSummary:
+    t = _topic(name)
+    t.used_source_indices = indices
+    return t
+
+
+def test_topics_with_two_shared_sources_are_connected():
+    t1 = _topic_with_sources("AI policy", [1, 2, 3])
+    t2 = _topic_with_sources("Technology", [2, 3, 4])  # shares 2, 3
+    digest = _digest(
+        [t1, t2],
+        sources=[(i, f"S{i}", f"https://s{i}.com") for i in range(1, 5)],
+    )
+    connections = _find_topic_connections(digest)
+    assert "AI policy" in connections
+    related_names = [name for name, _ in connections["AI policy"]]
+    assert "Technology" in related_names
+
+
+def test_topics_with_only_one_shared_source_are_not_connected():
+    t1 = _topic_with_sources("Finance", [1, 2])
+    t2 = _topic_with_sources("Sports", [2, 3])  # only shares 2
+    digest = _digest(
+        [t1, t2],
+        sources=[(i, f"S{i}", f"https://s{i}.com") for i in range(1, 4)],
+    )
+    connections = _find_topic_connections(digest)
+    assert "Finance" not in connections
+
+
+def test_topic_connections_capped_at_three():
+    topics = [_topic_with_sources(f"Topic {i}", [1, 2, i + 3]) for i in range(6)]
+    # All share sources 1 and 2
+    digest = _digest(topics, sources=[(i, f"S{i}", f"https://s{i}.com") for i in range(1, 10)])
+    connections = _find_topic_connections(digest)
+    for related in connections.values():
+        assert len(related) <= 3
+
+
+def test_no_self_connections():
+    t1 = _topic_with_sources("Solo", [1, 2, 3])
+    digest = _digest([t1], sources=[(i, f"S{i}", f"https://s{i}.com") for i in range(1, 4)])
+    connections = _find_topic_connections(digest)
+    # Solo topic has no other topics to connect to
+    assert connections.get("Solo", []) == []
+
+
+def test_connection_overlap_count_is_correct():
+    t1 = _topic_with_sources("Climate", [1, 2, 3, 4])
+    t2 = _topic_with_sources("Energy", [2, 3, 4, 5])  # 3 shared: 2, 3, 4
+    digest = _digest(
+        [t1, t2],
+        sources=[(i, f"S{i}", f"https://s{i}.com") for i in range(1, 6)],
+    )
+    connections = _find_topic_connections(digest)
+    energy_overlap = next(count for name, count in connections["Climate"] if name == "Energy")
+    assert energy_overlap == 3
+
+
+def test_related_topics_appear_in_markdown():
+    t1 = _topic_with_sources("Climate", [1, 2, 3])
+    t2 = _topic_with_sources("Energy", [2, 3, 4])
+    digest = _digest(
+        [t1, t2],
+        sources=[(i, f"S{i}", f"https://s{i}.com") for i in range(1, 5)],
+    )
+    md = render_markdown(digest)
+    assert "Related topics" in md
+    assert "Energy" in md
+
+
+# ---------------------------------------------------------------------------
+# Priority 3 — _detect_contradictions
+# ---------------------------------------------------------------------------
+
+def test_contradiction_detected_with_marker_and_different_citations():
+    cluster = ClusterSummary(
+        heading="Analysis",
+        bullets=[
+            ClusterBullet(text="Costs will rise however analysts disagree [1]", citations=[1]),
+            ClusterBullet(text="Markets stable despite the concerns [2]", citations=[2]),
+        ],
+    )
+    topic = _topic(clusters=[cluster])
+    contradictions = _detect_contradictions(topic)
+    assert len(contradictions) >= 1
+
+
+def test_no_contradiction_when_same_citations():
+    cluster = ClusterSummary(
+        heading="Analysis",
+        bullets=[
+            ClusterBullet(text="Although costs rose last month [1]", citations=[1]),
+            ClusterBullet(text="However prices stabilised this week [1]", citations=[1]),
+        ],
+    )
+    topic = _topic(clusters=[cluster])
+    contradictions = _detect_contradictions(topic)
+    assert len(contradictions) == 0
+
+
+def test_no_contradiction_without_adversative_markers():
+    cluster = ClusterSummary(
+        heading="Analysis",
+        bullets=[
+            ClusterBullet(text="Markets rose steadily in Q3 [1]", citations=[1]),
+            ClusterBullet(text="Employment increased by 2% [2]", citations=[2]),
+        ],
+    )
+    topic = _topic(clusters=[cluster])
+    contradictions = _detect_contradictions(topic)
+    assert len(contradictions) == 0
+
+
+def test_contradictions_capped_at_three():
+    # 5 bullets all with contradiction markers, each citing a different source
+    bullets = [
+        ClusterBullet(text=f"Despite earlier reports source {i} says the opposite [{i}]", citations=[i])
+        for i in range(1, 6)
+    ]
+    cluster = ClusterSummary(heading="Conflicts", bullets=bullets)
+    topic = _topic(clusters=[cluster])
+    contradictions = _detect_contradictions(topic)
+    assert len(contradictions) <= 3
+
+
+def test_contradictions_section_appears_in_markdown_when_present():
+    cluster = ClusterSummary(
+        heading="Analysis",
+        bullets=[
+            ClusterBullet(text="Growth expected however headwinds remain [1]", citations=[1]),
+            ClusterBullet(text="But contrary signals from regulators [2]", citations=[2]),
+        ],
+    )
+    t = _topic("economics", clusters=[cluster], stories=[])
+    digest = _digest([t], sources=[(1, "A", "https://a.com"), (2, "B", "https://b.com")])
+    md = render_markdown(digest)
+    assert "Potential Discrepancies" in md

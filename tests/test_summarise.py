@@ -4,12 +4,14 @@ from types import SimpleNamespace
 import pytest
 
 from newsbot.config import AppConfig
-from newsbot.models import FetchedPage
+from newsbot.models import ClusterBullet, ClusterSummary, FetchedPage
 from newsbot.summarise import (
     _extract_message_content,
     _parse_json_stories,
     _sanitise_content,
     _stories_to_clusters,
+    _validate_cluster_coherence,
+    flag_fragmented_clusters,
     summarise_topic,
 )
 
@@ -122,6 +124,82 @@ def test_json_mode_validates_and_renders(monkeypatch):
     parsed = _parse_json_stories(json.dumps(payload), sources_table, DummyLogger())
     clusters = _stories_to_clusters(parsed)
     assert clusters[0].bullets
+
+
+# ---------------------------------------------------------------------------
+# Priority 3 — cluster coherence validation
+# ---------------------------------------------------------------------------
+
+def test_single_bullet_cluster_has_perfect_coherence():
+    cluster = ClusterSummary(
+        heading="Solo",
+        bullets=[ClusterBullet(text="One item [1]", citations=[1])],
+    )
+    assert _validate_cluster_coherence(cluster) == 1.0
+
+
+def test_all_same_citations_has_perfect_coherence():
+    cluster = ClusterSummary(
+        heading="Focused",
+        bullets=[
+            ClusterBullet(text="First point [1][2]", citations=[1, 2]),
+            ClusterBullet(text="Second point [1][2]", citations=[1, 2]),
+        ],
+    )
+    assert _validate_cluster_coherence(cluster) == 1.0
+
+
+def test_completely_different_citations_has_zero_coherence():
+    cluster = ClusterSummary(
+        heading="Mixed",
+        bullets=[
+            ClusterBullet(text="Point A [1]", citations=[1]),
+            ClusterBullet(text="Point B [2]", citations=[2]),
+        ],
+    )
+    assert _validate_cluster_coherence(cluster) == 0.0
+
+
+def test_partial_citation_overlap_gives_intermediate_coherence():
+    cluster = ClusterSummary(
+        heading="Partial",
+        bullets=[
+            ClusterBullet(text="Point A [1][2]", citations=[1, 2]),
+            ClusterBullet(text="Point B [2][3]", citations=[2, 3]),
+        ],
+    )
+    coherence = _validate_cluster_coherence(cluster)
+    # Jaccard: |{2}| / |{1,2,3}| = 1/3 ≈ 0.33
+    assert 0.0 < coherence < 1.0
+
+
+def test_fragmented_cluster_gets_loosely_related_label():
+    cluster = ClusterSummary(
+        heading="Jumbled",
+        bullets=[
+            ClusterBullet(text="Point [1]", citations=[1]),
+            ClusterBullet(text="Point [2]", citations=[2]),
+            ClusterBullet(text="Point [3]", citations=[3]),
+        ],
+    )
+    result = flag_fragmented_clusters([cluster])
+    assert "Loosely related" in result[0].heading
+
+
+def test_coherent_cluster_heading_unchanged():
+    cluster = ClusterSummary(
+        heading="Tight",
+        bullets=[
+            ClusterBullet(text="Point [1][2]", citations=[1, 2]),
+            ClusterBullet(text="Point [1][2]", citations=[1, 2]),
+        ],
+    )
+    result = flag_fragmented_clusters([cluster])
+    assert result[0].heading == "Tight"
+
+
+def test_flag_fragmented_clusters_handles_empty_list():
+    assert flag_fragmented_clusters([]) == []
 
 
 def test_tools_flag(monkeypatch):

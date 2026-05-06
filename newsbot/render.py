@@ -366,6 +366,50 @@ def _compute_digest_statistics(digest: Digest) -> dict[str, int | float]:
     }
 
 
+_CONTRADICTION_MARKERS = frozenset(["however", "but", "despite", "contrary", "although"])
+
+
+def _find_topic_connections(digest: Digest) -> dict[str, list[tuple[str, int]]]:
+    """Find topics with ≥2 shared source indices."""
+    topic_sources: dict[str, set[int]] = {
+        t.topic: set(t.used_source_indices) for t in digest.topics
+    }
+    connections: dict[str, list[tuple[str, int]]] = {}
+    for topic, sources in topic_sources.items():
+        related: list[tuple[str, int]] = []
+        for other, other_sources in topic_sources.items():
+            if other == topic:
+                continue
+            overlap = len(sources & other_sources)
+            if overlap >= 2:
+                related.append((other, overlap))
+        if related:
+            related.sort(key=lambda x: x[1], reverse=True)
+            connections[topic] = related[:3]
+    return connections
+
+
+def _detect_contradictions(topic: TopicSummary) -> list[str]:
+    """Flag bullet pairs from different sources that contain adversative markers."""
+    all_bullets = [b for cluster in topic.clusters for b in cluster.bullets]
+    contradictions: list[str] = []
+    for i, b1 in enumerate(all_bullets):
+        for b2 in all_bullets[i + 1:]:
+            if set(b1.citations) == set(b2.citations):
+                continue
+            text_lower = b1.text.lower() + " " + b2.text.lower()
+            if any(marker in text_lower for marker in _CONTRADICTION_MARKERS):
+                src1 = b1.citations[0] if b1.citations else None
+                src2 = b2.citations[0] if b2.citations else None
+                if src1 and src2:
+                    contradictions.append(
+                        f"Different sources report varying details. See [{src1}] vs [{src2}]"
+                    )
+                if len(contradictions) >= 3:
+                    return contradictions
+    return contradictions
+
+
 def render_markdown(digest: Digest) -> str:
     """Render the digest to Markdown."""
 
@@ -408,6 +452,8 @@ def render_markdown(digest: Digest) -> str:
             cluster_anchor = _cluster_anchor(topic_anchor, cluster.heading)
             lines.append(f"  - [{cluster.heading}](#{cluster_anchor})")
 
+    connections = _find_topic_connections(digest)
+
     for topic in digest.topics:
         topic_anchor = _topic_anchor(topic)
         title = to_title_case(topic.topic)
@@ -420,6 +466,14 @@ def render_markdown(digest: Digest) -> str:
         if flags:
             badge_line += " " + " ".join(f"_{flag}_" for flag in flags)
         lines.append(badge_line)
+
+        topic_connections = connections.get(topic.topic, [])
+        if topic_connections:
+            parts = ", ".join(
+                f"{to_title_case(name)} ({n} shared {'source' if n == 1 else 'sources'})"
+                for name, n in topic_connections
+            )
+            lines.append(f"_Related topics: {parts}_")
 
         at_a_glance = _select_at_a_glance(topic, sources_lookup)
         if at_a_glance:
@@ -479,6 +533,12 @@ def render_markdown(digest: Digest) -> str:
                     lines.append(f"- {bullet.text}{_markdown_domain_suffix(domains)}")
         else:
             lines.append("*No sufficiently reliable updates found.*")
+
+        contradictions = _detect_contradictions(topic)
+        if contradictions:
+            lines.append("### Potential Discrepancies")
+            for note in contradictions:
+                lines.append(f"⚠️ {note}")
 
         further_reading, remaining = _prepare_further_reading(topic)
         if further_reading:
