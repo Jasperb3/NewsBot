@@ -1,96 +1,231 @@
-# news-digest-bot
+# NewsBot — AI-Powered News Digest Generator
 
-Generate a topic-oriented daily news digest powered by Ollama's web search. The bot searches, fetches, summarises, and renders Markdown (and optional HTML) reports with numbered citations and archived run data for reproducibility.
+Turn any set of topics into a structured, cited, quality-scored news briefing — fully local, powered by [Ollama](https://ollama.com).
 
-## Features
-- Topic-based search using `ollama.web_search` with domain preference/exclusion controls
-- Content fetching via `ollama.web_fetch`, triage for duplicates, diversity, and recency
-- Model-driven summarisation with clustered bullets and numeric citations
-- Markdown (and optional HTML) rendering with source appendix and run metadata
-- Timestamped `runs/` directory storing inputs, outputs, and manifest per execution
-- Configurable via environment variables, optional `.env`, and command-line overrides
+NewsBot searches the web, fetches and deduplicates articles, runs them through a local LLM, and produces a polished Markdown (or HTML) digest with numbered citations, corroboration metrics, source quality badges, and cross-topic analysis. Every run is reproducible: raw inputs, outputs, and a manifest are archived in a timestamped directory.
+
+---
+
+## What it produces
+
+A daily digest with:
+
+- **Executive Summary** — top stories across all topics ranked by importance (corroboration, recency, update status)
+- **Digest Overview** — coverage stats, corroboration rate, and count of stories that changed since the last run
+- **Per-topic sections** with:
+  - *At a Glance* — highest-priority bullets, scored and sorted automatically
+  - *Top Stories* — structured headlines with `why it matters`, dated bullets, confidence levels (High / Medium / Low), and source quality badges (⭐ trusted news, 🏛️ official, 🎓 academic)
+  - *Timeline* — dated events split into "Recent developments" and "Historical context"
+  - *Potential Discrepancies* — flags when sources with different citations use adversative language (`however`, `but`, `despite`…)
+  - *Related Topics* — links topics that share ≥2 sources
+  - *Further Reading* — unused sources not summarised in the main body
+- **Full source appendix** — every URL cited, globally reindexed across topics
+- **HTML output** (optional) — responsive, dark-mode-aware, with sticky navigation and copy-link buttons
+
+### Example output
+
+```markdown
+# Daily Digest — 2026-05-06 (Europe/London)
+Generated with gemma4:e4b — Topics: 3; Sources: 14; Elapsed: 142.1s
+
+## Executive Summary
+- **AI Regulation:** EU AI Act enters enforcement phase — first binding obligations apply to prohibited-use systems...
+- **UK Economy:** OBR revises growth forecast downward — GDP growth cut to 1.0% for 2026...
+- **Climate:** Arctic sea ice extent hits record April low — scientists warn of accelerating feedback loops...
+
+## Digest Overview
+📊 **Coverage:** 3 topics · 14 sources · 11 unique domains
+🔍 **Quality:** 71% corroboration rate · 4.7 sources/topic avg
+⏱️ **Recency:** 3 stories updated since last run
+
+## Table of Contents
+- [AI Regulation](#ai-regulation) _~4 min read_
+- [UK Economy](#uk-economy) _~3 min read_
+- [Climate](#climate) _~2 min read_
+
+---
+
+<a id="ai-regulation"></a>
+## AI Regulation
+_Sources: 6 · Domains: 5 · Corroboration: 8/10_ ✅ Well-sourced
+_Related topics: UK Economy (2 shared sources)_
+
+### At a glance
+- EU AI Act enforcement begins — prohibited AI systems must be removed from market by August 2025 [1][2][3] — ⭐ reuters.com, 🏛️ eur-lex.europa.eu
+
+### Top stories
+
+#### [EU AI Act: Prohibited Systems Deadline Passes](https://example.com)
+*2026-02-02 · Sources: 4 · Domains: ⭐ reuters.com, 🏛️ eur-lex.europa.eu, ⭐ bbc.co.uk, 🎓 ox.ac.uk*
+*Confidence: High - 4 independent sources*
+_Why it matters:_ The first enforcement milestone affects providers of biometric categorisation and social scoring systems across the EU.
+
+- Providers must discontinue or retrofit prohibited AI systems by the August deadline or face fines up to €35 million [1][2] — ⭐ reuters.com, 🏛️ eur-lex.europa.eu
+- National market surveillance authorities are activating enforcement mechanisms across all 27 member states [2][3] — 🏛️ eur-lex.europa.eu, ⭐ bbc.co.uk
+```
+
+---
+
+## Architecture
+
+```
+Topics (CLI) → Search → Fetch → Triage → Summarise → Render → Output
+                                                              ↓
+                                              digest.md / digest.html / digest.json
+                                              runs/YYYYMMDD_HHMMSS/ (archived)
+```
+
+| Stage | File | What it does |
+|---|---|---|
+| Search | `newsbot/search.py` | `ollama.web_search` per topic, domain filtering |
+| Fetch | `newsbot/fetch.py` | `ollama.web_fetch` with 3-attempt retry + snippet fallback |
+| Triage | `newsbot/triage.py` | Title dedup, n-gram content-similarity dedup (>80% Jaccard), domain diversity, recency ordering |
+| Summarise | `newsbot/summarise.py` | JSON-mode LLM summarisation → Stories + fallback cluster parsing; cluster coherence validation |
+| Render | `newsbot/render.py` | Markdown + HTML + JSON; all quality-analysis features |
+| CLI | `newsbot/cli.py` | Orchestration, global citation reindexing, cross-run story tracking, importance scoring |
+
+---
 
 ## Installation
-1. Ensure Python 3.10 or newer is available.
-2. Clone this repository and install the package in editable mode:
-   ```bash
-   pip install -e .
-   ```
-3. Optionally install development extras (pytest, python-dotenv):
-   ```bash
-   pip install -e .[dev]
-   ```
+
+Requires Python 3.10+ and a running [Ollama](https://ollama.com) instance.
+
+```bash
+git clone https://github.com/Jasperb3/NewsBot.git
+cd NewsBot
+
+# Create a virtual environment (recommended)
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+
+# Install (with dev dependencies for testing)
+pip install -e .[dev]
+```
+
+---
 
 ## Configuration
-Environment variables control runtime behaviour. Copy `.env.example` if you want convenient defaults:
 
-```
-cp .env.example .env
-```
+Create a `.env` file in the project root (see variables below). All settings have sensible defaults for local Ollama.
 
-Key variables:
-- `OLLAMA_API_KEY` – required for remote Ollama instances (local daemon may not need it)
-- `MODEL` – Ollama model alias (default `qwen3:4b`)
-- `MAX_RESULTS_PER_TOPIC` / `FETCH_LIMIT_PER_TOPIC` – limits per topic (≤10)
-- `PREFER_DOMAINS`, `EXCLUDE_DOMAINS` – comma-separated domain hints
-- `MAX_CHARS_PER_PAGE`, `MAX_BATCH_CHARS` – soft caps for fetch content and prompt batching
-- `OUTPUT_FORMAT` – `md` or `html` (CLI argument takes precedence for HTML output)
+| Variable | Default | Description |
+|---|---|---|
+| `OLLAMA_API_KEY` | — | API key for remote Ollama instances; omit for local daemon |
+| `MODEL` | `qwen3:4b` | Ollama model alias |
+| `MAX_RESULTS_PER_TOPIC` | `6` | Search hits per topic (max 10) |
+| `FETCH_LIMIT_PER_TOPIC` | `6` | Pages to fetch per topic (max 10) |
+| `MAX_CHARS_PER_PAGE` | `6000` | Content truncation per page before summarisation |
+| `MAX_BATCH_CHARS` | `18000` | Total prompt size cap across all pages |
+| `PREFER_DOMAINS` | — | Comma-separated domains to prioritise |
+| `EXCLUDE_DOMAINS` | — | Comma-separated domains to exclude |
+| `OUTPUT_FORMAT` | `md` | `md` or `html` |
+| `TZ` | `Europe/London` | Timezone for timestamps |
+
+**Default preferred domains:** reuters.com, ft.com, apnews.com, bbc.co.uk, theguardian.com, cnbc.com, techcrunch.com, wired.com
+
+---
 
 ## Usage
-Example invocations:
-- Markdown digest for two topics with custom limit:
-  ```bash
-  newsbot --topics "AI policy, renewable energy" --max-results 6 --out digest.md
-  ```
-- Include HTML output and exclude certain domains:
-  ```bash
-  newsbot --topics "UK politics" --html --exclude "reddit.com, medium.com"
-  ```
-- Dry run to inspect search results only:
-  ```bash
-  newsbot --topics "AI" --dry-run
-  ```
 
-### Output structure
-Each run creates `runs/YYYYMMDD_HHMMSS/` containing:
-- `search_<topic>.jsonl` – raw search results
-- `fetch_<topic>.jsonl` – triaged fetch payloads
-- `digest.md` (and `digest.html` when requested)
-- `manifest.json` – metadata (model, timings, file paths)
-
-Markdown digests look like:
-```
-# Daily Digest — 2025-09-26 (Europe/London)
-
-## AI policy
-### Regulatory shifts
-- New policy language appears in the draft bill [1]
-
-## Sources
-- [1] Example Source — https://example.com
----
-Generated at 2025-09-26T08:30:00+01:00 (Europe/London) using qwen3:4b. Topics: 1; sources: 1.
-```
-
-### Citations & limits
-- Bullets always include numeric markers `[n]` matching the Sources list.
-- Datasets are trimmed by `MAX_CHARS_PER_PAGE` before summarisation; extremely long pages may be chunked.
-- Summaries aim for 3–5 bullets per cluster; overflow is trimmed.
-
-## Ethical considerations
-- Respect publisher terms of service and robots directives.
-- Attribute sources clearly using the generated citations.
-- Use the bot to assist expert judgement; verify contentious claims before redistribution.
-
-## Troubleshooting
-- **Authentication errors** – confirm the Ollama daemon is running and `OLLAMA_API_KEY` (if required) is set.
-- **Empty results** – broaden topics, adjust `--max-results`, or revisit domain filters.
-- **Token/size limits** – decrease `MAX_RESULTS_PER_TOPIC` or `MAX_CHARS_PER_PAGE` to stay within model context.
-- **Network failures** – rerun after transient errors; dry runs retain successful searches for inspection.
-
-## Testing
-Unit tests cover pure helpers and triage heuristics. Run them with:
 ```bash
-pytest
+# Basic: two topics, 6 results each, output to digest.md
+newsbot --topics "AI regulation, UK economy" --out digest.md
+
+# More results, HTML output, exclude noisy domains
+newsbot --topics "climate policy" --max-results 8 --html --exclude "reddit.com,medium.com"
+
+# Prefer specific sources
+newsbot --topics "financial markets" --prefer "ft.com,bloomberg.com,reuters.com"
+
+# Dry run: search only, no fetch or summarise
+newsbot --topics "AI" --dry-run
+
+# Verbose logging
+newsbot --topics "UK politics" --verbose
 ```
-Tests use only synthetic data and do not perform live network calls.
+
+### CLI reference
+
+| Flag | Description |
+|---|---|
+| `--topics` | Comma-separated list of topics (required) |
+| `--max-results N` | Results per topic, 1–10 (overrides env) |
+| `--out PATH` | Copy final Markdown here (default: `digest.md`) |
+| `--html` | Also render an HTML digest |
+| `--prefer DOMAINS` | Comma-separated domain priority list |
+| `--exclude DOMAINS` | Comma-separated domain blocklist |
+| `--corroborate` | Allow LLM to call web tools during summarisation |
+| `--dry-run` | Search only; skip fetch and summarise |
+| `--verbose` | Enable DEBUG-level logging |
+
+---
+
+## Output files
+
+Each run creates `runs/YYYYMMDD_HHMMSS/`:
+
+```
+runs/
+└── 20260506_162441/
+    ├── search_ai-regulation.jsonl    # Raw search hits
+    ├── fetch_ai-regulation.jsonl     # Triaged fetched pages
+    ├── search_uk-economy.jsonl
+    ├── fetch_uk-economy.jsonl
+    ├── digest.md                     # Markdown output
+    ├── digest.html                   # HTML output (if --html)
+    ├── digest.json                   # Machine-readable digest
+    └── manifest.json                 # Run metadata & file refs
+```
+
+`runs/latest.json` is updated after each run and used for cross-run story tracking (detecting updated stories).
+
+---
+
+## Quality features
+
+### Citation integrity
+- Every bullet includes `[n]` markers tied to the source appendix
+- Citations are globally reindexed across topics to prevent collisions
+- Unused sources are pruned; duplicates are deduplicated
+
+### Story importance scoring
+Stories are ranked before rendering using a 0–100 score:
+- Corroboration: up to 40 pts (10 per independent source)
+- Updated since last run: 30 pts
+- Has a date: 10 pts; very recent (≤7 days): +10 pts; recent (≤30 days): +5 pts
+- Content depth: up to 20 pts (5 per bullet)
+
+### Cross-run story tracking
+On each run, the previous digest is compared and stories are flagged `Updated since last run` with a note describing what changed (e.g., *"Content updated: 2 new bullets, 1 removed"*).
+
+### Cluster coherence validation
+After summarisation, clusters whose bullets draw from entirely different sources (Jaccard similarity < 0.3) are labelled *(Loosely related)* to signal LLM fragmentation.
+
+### Content-similarity deduplication
+Beyond title deduplication, pages with >80% 3-gram overlap are dropped before summarisation, preventing the LLM from citing syndicated copies as independent sources.
+
+---
+
+## Development
+
+```bash
+# Run the full test suite (90 tests, no network calls)
+pytest
+
+# Run with coverage
+pytest --cov=newsbot
+
+# Lint
+ruff check newsbot
+```
+
+Tests use only synthetic fixtures — no live network calls. The suite covers all pipeline stages and quality-analysis functions.
+
+---
+
+## Ethical use
+
+- Respect publishers' terms of service and robots directives
+- Attribute sources clearly — every claim in the digest has a numbered citation
+- Use digests to assist expert judgement, not replace it; verify contentious claims before redistribution
+- The bot is rate-limited by design: at most 10 fetches per topic

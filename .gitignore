@@ -1,7 +1,10 @@
 __pycache__/
+.pytest_cache/
 .venv/
 .env
 runs/
+docs/
 logs/
-.pytest_cache/
+news_digest_bot.egg-info/
 digest.md
+CLAUDE.md
