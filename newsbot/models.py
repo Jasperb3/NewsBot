@@ -19,6 +19,7 @@ class FetchedPage:
     links: list[str]
     topic: str
     is_snippet: bool = False
+    fetcher: str = "ollama"
 
 
 @dataclass(slots=True)
