@@ -19,9 +19,13 @@ dependencies = [
 dev = [
     "python-dotenv>=1.0",
     "pytest>=7",
+    "tavily-python>=0.5",
 ]
 test = [
     "pytest>=7",
+]
+tavily = [
+    "tavily-python>=0.5",
 ]
 
 [project.scripts]

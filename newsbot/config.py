@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, MutableMapping
 
 from .log import get_logger
@@ -31,6 +31,11 @@ class AppConfig:
     exclude_domains: list[str]
     max_chars_per_page: int
     max_batch_chars: int
+    search_providers: list[str] = field(default_factory=lambda: ["ollama"])
+    tavily_api_key: str | None = None
+    tavily_search_depth: str = "basic"
+    tavily_topic: str = "news"
+    tavily_days: int = 7
 
 
 def _parse_int(env: Mapping[str, str], key: str, default: int, minimum: int = 1, maximum: int | None = None) -> int:
@@ -90,6 +95,28 @@ def load_config(env: MutableMapping[str, str] | Mapping[str, str] | None = None)
     prefer_domains = split_and_strip_csv(env.get("PREFER_DOMAINS"))
     exclude_domains = split_and_strip_csv(env.get("EXCLUDE_DOMAINS"))
 
+    search_providers = split_and_strip_csv(env.get("SEARCH_PROVIDERS")) or ["ollama"]
+
+    tavily_api_key = env.get("TAVILY_API_KEY") or None
+
+    tavily_depth_raw = env.get("TAVILY_SEARCH_DEPTH", "basic").strip().lower()
+    if tavily_depth_raw not in {"basic", "advanced"}:
+        LOGGER.warning(
+            "Unsupported TAVILY_SEARCH_DEPTH '%s', falling back to 'basic'",
+            tavily_depth_raw,
+        )
+        tavily_depth_raw = "basic"
+
+    tavily_topic_raw = env.get("TAVILY_TOPIC", "news").strip().lower()
+    if tavily_topic_raw not in {"news", "general"}:
+        LOGGER.warning(
+            "Unsupported TAVILY_TOPIC '%s', falling back to 'news'",
+            tavily_topic_raw,
+        )
+        tavily_topic_raw = "news"
+
+    tavily_days = _parse_int(env, "TAVILY_DAYS", default=7, minimum=1, maximum=365)
+
     config = AppConfig(
         api_key=api_key,
         model=model,
@@ -101,6 +128,11 @@ def load_config(env: MutableMapping[str, str] | Mapping[str, str] | None = None)
         exclude_domains=exclude_domains,
         max_chars_per_page=max_chars_per_page,
         max_batch_chars=max_batch_chars,
+        search_providers=search_providers,
+        tavily_api_key=tavily_api_key,
+        tavily_search_depth=tavily_depth_raw,
+        tavily_topic=tavily_topic_raw,
+        tavily_days=tavily_days,
     )
 
     LOGGER.debug("Loaded configuration: %s", config)
