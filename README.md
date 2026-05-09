@@ -77,8 +77,8 @@ Topics (CLI) → Search → Fetch → Triage → Summarise → Render → Output
 
 | Stage | File | What it does |
 |---|---|---|
-| Search | `newsbot/search.py` | `ollama.web_search` per topic, domain filtering |
-| Fetch | `newsbot/fetch.py` | `ollama.web_fetch` with 3-attempt retry + snippet fallback |
+| Search | `newsbot/search.py` | Multi-provider orchestrator: round-robin interleave, URL dedup, domain filtering |
+| Fetch | `newsbot/fetch.py` | `ollama.web_fetch` → `trafilatura` → snippet fallback chain; `fetcher` field on every page |
 | Triage | `newsbot/triage.py` | Title dedup, n-gram content-similarity dedup (>80% Jaccard), domain diversity, recency ordering |
 | Summarise | `newsbot/summarise.py` | JSON-mode LLM summarisation → Stories + fallback cluster parsing; cluster coherence validation |
 | Render | `newsbot/render.py` | Markdown + HTML + JSON; all quality-analysis features |
@@ -231,12 +231,15 @@ After summarisation, clusters whose bullets draw from entirely different sources
 ### Content-similarity deduplication
 Beyond title deduplication, pages with >80% 3-gram overlap are dropped before summarisation, preventing the LLM from citing syndicated copies as independent sources.
 
+### Fetch resilience
+Each URL goes through a three-stage fallback chain: `ollama.web_fetch` (3 retries) → `trafilatura` HTML extraction → search snippet. A per-source breakdown is logged after each topic fetch so you can see how often each tier fires. The `trafilatura` dependency is optional; the pipeline degrades gracefully if it is absent.
+
 ---
 
 ## Development
 
 ```bash
-# Run the full test suite (90 tests, no network calls)
+# Run the full test suite (126 tests, no network calls)
 pytest
 
 # Run with coverage
