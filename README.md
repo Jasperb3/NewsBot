@@ -77,7 +77,7 @@ Topics (CLI) → Search → Fetch → Triage → Summarise → Render → Output
 
 | Stage | File | What it does |
 |---|---|---|
-| Search | `newsbot/search.py` | `ollama.web_search` per topic, domain filtering |
+| Search | `newsbot/search.py` | Multi-provider orchestrator: round-robin interleave, URL dedup, domain filtering |
 | Fetch | `newsbot/fetch.py` | `ollama.web_fetch` → `trafilatura` → snippet fallback chain; `fetcher` field on every page |
 | Triage | `newsbot/triage.py` | Title dedup, n-gram content-similarity dedup (>80% Jaccard), domain diversity, recency ordering |
 | Summarise | `newsbot/summarise.py` | JSON-mode LLM summarisation → Stories + fallback cluster parsing; cluster coherence validation |
@@ -120,8 +120,35 @@ Create a `.env` file in the project root (see variables below). All settings hav
 | `EXCLUDE_DOMAINS` | — | Comma-separated domains to exclude |
 | `OUTPUT_FORMAT` | `md` | `md` or `html` |
 | `TZ` | `Europe/London` | Timezone for timestamps |
+| `SEARCH_PROVIDERS` | `ollama` | Comma-separated list of search providers to combine. Currently supported: `ollama`, `tavily` |
+| `TAVILY_API_KEY` | — | Required when `tavily` is in `SEARCH_PROVIDERS`. Get one at [tavily.com](https://tavily.com); free tier covers ~1k searches/mo |
+| `TAVILY_SEARCH_DEPTH` | `basic` | `basic` (1 credit) or `advanced` (2 credits, deeper crawl) |
+| `TAVILY_TOPIC` | `news` | `news` (recency-biased, mainstream outlets) or `general` |
+| `TAVILY_DAYS` | `7` | When `TAVILY_TOPIC=news`, only return results from the last N days |
 
-**Default preferred domains:** reuters.com, ft.com, apnews.com, bbc.co.uk, theguardian.com, cnbc.com, techcrunch.com, wired.com
+**Suggested preferred domains:** reuters.com, ft.com, apnews.com, bbc.co.uk, theguardian.com, cnbc.com, techcrunch.com, wired.com — set these via `PREFER_DOMAINS` to bias the merged result list toward trusted news sources.
+
+### Search providers
+
+Each provider runs independently and their results are round-robin interleaved, then deduplicated by canonical URL. A provider that fails (network error, missing API key) is logged and skipped — the run continues with whatever providers succeeded.
+
+| Provider | What it adds | Cost | When to enable |
+|---|---|---|---|
+| `ollama` (default) | Broad, model-friendly search via the local Ollama daemon | Free | Always |
+| `tavily` | News-curated results with recency window; high-quality snippets that survive even if fetch fails | Free tier ~1k/mo | When you need wider source variety and stronger snippet fallbacks |
+
+To enable Tavily, set both:
+
+```bash
+SEARCH_PROVIDERS=ollama,tavily
+TAVILY_API_KEY=tvly-...
+```
+
+and install the optional dependency:
+
+```bash
+pip install -e .[tavily]
+```
 
 ---
 
@@ -212,7 +239,7 @@ Each URL goes through a three-stage fallback chain: `ollama.web_fetch` (3 retrie
 ## Development
 
 ```bash
-# Run the full test suite (94 tests, no network calls)
+# Run the full test suite (126 tests, no network calls)
 pytest
 
 # Run with coverage
