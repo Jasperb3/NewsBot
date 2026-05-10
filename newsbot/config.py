@@ -36,6 +36,9 @@ class AppConfig:
     tavily_search_depth: str = "basic"
     tavily_topic: str = "news"
     tavily_days: int = 7
+    distill_enabled: bool = False
+    distill_threshold_chars: int = 4000
+    distill_target_chars: int = 1500
 
 
 def _parse_int(env: Mapping[str, str], key: str, default: int, minimum: int = 1, maximum: int | None = None) -> int:
@@ -54,6 +57,19 @@ def _parse_int(env: Mapping[str, str], key: str, default: int, minimum: int = 1,
         LOGGER.warning("%s above maximum (%s), clamping", key, maximum)
         value = maximum
     return value
+
+
+def _parse_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
+    raw = env.get(key)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on", "y"}:
+        return True
+    if value in {"0", "false", "no", "off", "n", ""}:
+        return False
+    LOGGER.warning("Invalid boolean for %s ('%s'), using default %s", key, raw, default)
+    return default
 
 
 def _normalise_format(fmt: str) -> str:
@@ -117,6 +133,14 @@ def load_config(env: MutableMapping[str, str] | Mapping[str, str] | None = None)
 
     tavily_days = _parse_int(env, "TAVILY_DAYS", default=7, minimum=1, maximum=365)
 
+    distill_enabled = _parse_bool(env, "DISTILL_ENABLED", default=False)
+    distill_threshold_chars = _parse_int(
+        env, "DISTILL_THRESHOLD_CHARS", default=4000, minimum=500
+    )
+    distill_target_chars = _parse_int(
+        env, "DISTILL_TARGET_CHARS", default=1500, minimum=200
+    )
+
     config = AppConfig(
         api_key=api_key,
         model=model,
@@ -133,6 +157,9 @@ def load_config(env: MutableMapping[str, str] | Mapping[str, str] | None = None)
         tavily_search_depth=tavily_depth_raw,
         tavily_topic=tavily_topic_raw,
         tavily_days=tavily_days,
+        distill_enabled=distill_enabled,
+        distill_threshold_chars=distill_threshold_chars,
+        distill_target_chars=distill_target_chars,
     )
 
     LOGGER.debug("Loaded configuration: %s", config)

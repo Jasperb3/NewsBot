@@ -13,6 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import AppConfig, load_config
+from .distill import distill_pages
 from .fetch import fetch_pages
 from .log import get_logger
 from .models import Digest, TopicSummary
@@ -381,10 +382,11 @@ def main(argv: list[str] | None = None) -> int:
 
             pages = fetch_pages(hits, cfg, logger, topic=topic)
             triaged = triage_pages(pages)
+            distilled = distill_pages(triaged, cfg, logger)
             fetch_file = run_dir / f"fetch_{slug}.jsonl"
-            write_jsonl(fetch_file, (asdict(page) for page in triaged))
+            write_jsonl(fetch_file, (asdict(page) for page in distilled))
 
-            summary, sources_table = summarise_topic(topic, triaged, cfg, logger, args.corroborate)
+            summary, sources_table = summarise_topic(topic, distilled, cfg, logger, args.corroborate)
 
             used_local = sorted(collect_used_citations(summary.clusters))
             used_sources_local = [entry for entry in sources_table if entry[0] in used_local]
