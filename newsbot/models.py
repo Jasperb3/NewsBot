@@ -20,6 +20,7 @@ class FetchedPage:
     topic: str
     is_snippet: bool = False
     fetcher: str = "ollama"
+    distilled: bool = False
 
 
 @dataclass(slots=True)

@@ -69,10 +69,10 @@ _Why it matters:_ The first enforcement milestone affects providers of biometric
 ## Architecture
 
 ```
-Topics (CLI) → Search → Fetch → Triage → Summarise → Render → Output
-                                                              ↓
-                                              digest.md / digest.html / digest.json
-                                              runs/YYYYMMDD_HHMMSS/ (archived)
+Topics (CLI) → Search → Fetch → Triage → Distill → Summarise → Render → Output
+                                                                        ↓
+                                                  digest.md / digest.html / digest.json
+                                                  runs/YYYYMMDD_HHMMSS/ (archived)
 ```
 
 | Stage | File | What it does |
@@ -80,6 +80,7 @@ Topics (CLI) → Search → Fetch → Triage → Summarise → Render → Output
 | Search | `newsbot/search.py` | Multi-provider orchestrator: round-robin interleave, URL dedup, domain filtering |
 | Fetch | `newsbot/fetch.py` | `ollama.web_fetch` → `trafilatura` → snippet fallback chain; `fetcher` field on every page |
 | Triage | `newsbot/triage.py` | Title dedup, n-gram content-similarity dedup (>80% Jaccard), domain diversity, recency ordering |
+| Distill | `newsbot/distill.py` | (Optional) Per-article LLM compression: long bodies → dense fact-preserving prose. Off by default |
 | Summarise | `newsbot/summarise.py` | JSON-mode LLM summarisation → Stories + fallback cluster parsing; cluster coherence validation |
 | Render | `newsbot/render.py` | Markdown + HTML + JSON; all quality-analysis features |
 | CLI | `newsbot/cli.py` | Orchestration, global citation reindexing, cross-run story tracking, importance scoring |
@@ -125,6 +126,9 @@ Create a `.env` file in the project root (see variables below). All settings hav
 | `TAVILY_SEARCH_DEPTH` | `basic` | `basic` (1 credit) or `advanced` (2 credits, deeper crawl) |
 | `TAVILY_TOPIC` | `news` | `news` (recency-biased, mainstream outlets) or `general` |
 | `TAVILY_DAYS` | `7` | When `TAVILY_TOPIC=news`, only return results from the last N days |
+| `DISTILL_ENABLED` | `false` | When `true`, run a per-article distillation pass that compresses long article bodies into dense, fact-preserving prose before they reach the topic summariser |
+| `DISTILL_THRESHOLD_CHARS` | `4000` | Articles shorter than this skip distillation |
+| `DISTILL_TARGET_CHARS` | `1500` | Approximate target length of each distilled summary |
 
 **Suggested preferred domains:** reuters.com, ft.com, apnews.com, bbc.co.uk, theguardian.com, cnbc.com, techcrunch.com, wired.com — set these via `PREFER_DOMAINS` to bias the merged result list toward trusted news sources.
 
@@ -148,6 +152,24 @@ and install the optional dependency:
 
 ```bash
 pip install -e .[tavily]
+```
+
+### Per-article distillation
+
+By default, the topic summariser sees the raw fetched article body (up to `MAX_CHARS_PER_PAGE` per page). For long, noisy articles this dilutes the signal — the summariser has to find the citation-worthy facts inside ad-laced, multi-section pages.
+
+Set `DISTILL_ENABLED=true` to insert a per-article condensation pass between fetch and summarisation. Each article above `DISTILL_THRESHOLD_CHARS` is rewritten by the local Ollama model into ~`DISTILL_TARGET_CHARS` of dense prose with hard rules:
+
+- All proper nouns, dates, numbers, and direct quotes preserved verbatim
+- Web boilerplate (nav, ads, "related articles", paywall notices) stripped
+- No commentary added — flowing factual prose, no bullets or markdown
+
+**Trade-off:** doubles model calls per run (one per long article + one per topic), so expect ~2× wall-clock time. In return, the topic summariser gets cleaner, denser inputs — which is the largest single lever on output quality. Snippet-fallback pages and short articles are skipped automatically (no wasted calls). Distillation failures degrade gracefully: the original content is kept and a warning is logged.
+
+Watch for the per-run log line:
+
+```
+Distilled 4/6 pages: 28432 -> 6184 chars (saved 22248, 78% reduction)
 ```
 
 ---

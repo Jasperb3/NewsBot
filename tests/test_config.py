@@ -49,3 +49,44 @@ def test_tavily_days_clamped_to_range():
 def test_empty_tavily_api_key_normalises_to_none():
     cfg = load_config(env={"TAVILY_API_KEY": ""})
     assert cfg.tavily_api_key is None
+
+
+def test_distill_disabled_by_default():
+    cfg = load_config(env={})
+    assert cfg.distill_enabled is False
+    assert cfg.distill_threshold_chars == 4000
+    assert cfg.distill_target_chars == 1500
+
+
+def test_distill_enabled_via_env():
+    cfg = load_config(env={"DISTILL_ENABLED": "true"})
+    assert cfg.distill_enabled is True
+
+
+def test_distill_bool_accepts_common_truthy_values():
+    for truthy in ["1", "true", "TRUE", "yes", "on", "y"]:
+        cfg = load_config(env={"DISTILL_ENABLED": truthy})
+        assert cfg.distill_enabled is True, f"Expected '{truthy}' to be truthy"
+
+
+def test_distill_bool_accepts_common_falsy_values():
+    for falsy in ["0", "false", "no", "off", "n"]:
+        cfg = load_config(env={"DISTILL_ENABLED": falsy})
+        assert cfg.distill_enabled is False, f"Expected '{falsy}' to be falsy"
+
+
+def test_distill_threshold_and_target_parsed():
+    cfg = load_config(
+        env={
+            "DISTILL_ENABLED": "true",
+            "DISTILL_THRESHOLD_CHARS": "6000",
+            "DISTILL_TARGET_CHARS": "2000",
+        }
+    )
+    assert cfg.distill_threshold_chars == 6000
+    assert cfg.distill_target_chars == 2000
+
+
+def test_distill_threshold_clamped_to_minimum():
+    cfg = load_config(env={"DISTILL_THRESHOLD_CHARS": "100"})
+    assert cfg.distill_threshold_chars == 500
